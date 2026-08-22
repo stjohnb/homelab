@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: datasette
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: datasette
+  template:
+    metadata:
+      labels:
+        app: datasette
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: low-priority
+      enableServiceLinks: false
+      containers:
+        - name: datasette
+          image: datasetteproject/datasette:0.65.2
+          command:
+            - datasette
+          args:
+            - serve
+            - /data
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8001"
+          ports:
+            - containerPort: 8001
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /-/versions.json
+              port: 8001
+            periodSeconds: 15
+          startupProbe:
+            httpGet:
+              path: /-/versions.json
+              port: 8001
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /-/versions.json
+              port: 8001
+            periodSeconds: 10
+          volumeMounts:
+            - mountPath: /data
+              name: datasette-data
+      volumes:
+        - name: datasette-data
+          persistentVolumeClaim:
+            claimName: datasette-data

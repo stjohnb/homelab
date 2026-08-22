@@ -1,0 +1,13 @@
+# NOTE: With replicas=1, minAvailable=1 intentionally blocks voluntary
+# eviction (kubectl drain, node upgrades). This is a safety gate for
+# monitoring — planned maintenance requires temporarily deleting this PDB
+# or using `kubectl drain --disable-eviction`.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gatus
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: gatus

@@ -1,0 +1,236 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jellyfin-reconciler-script
+  labels:
+    app: jellyfin
+data:
+  reconcile.py: |
+    # Enforce the NAS-sleep safety settings from docs/nas-app-tier-migration.md
+    # step 7. Jellyfin runs on k3s against a *soft* NFS mount (media-soft-pvc):
+    # while the NAS sleeps the media tree reads as empty, and a library scan
+    # would conclude the media is gone and delete the entries. These settings
+    # were applied by hand in the UI, so a reinstall or settings reset
+    # silently loses them. Idempotent: it only POSTs when a value differs.
+    #
+    # Also enforces the Authentik SSO runtime config (#817): the
+    # jellyfin-plugin-sso plugin's OID provider config, the login-page
+    # button, and the plugin repository registration — all of which live in
+    # Jellyfin's database and are lost on a reinstall or settings reset.
+    import json
+    import os
+    import time
+    import urllib.error
+    import urllib.request
+
+    BASE = "http://localhost:8096"
+    INTERVAL = 300
+    API_KEY = os.environ.get("JELLYFIN_API_KEY", "").strip()
+
+    # Every one of these keeps writes off the soft NFS mount and keeps the
+    # scanner from acting on an empty-looking tree. Do not add fields here
+    # without checking they exist in the pinned Jellyfin version.
+    ENFORCED = {
+        "SaveLocalMetadata": False,
+        "EnableRealtimeMonitor": False,
+        "SaveTrickplayWithMedia": False,
+    }
+
+    OIDC_SECRET = os.environ.get("JELLYFIN_OIDC_CLIENT_SECRET", "").strip()
+    SSO_PLUGIN_ID = "505ce9d1d91642fa86ca673ef241d7df"
+    SSO_PROVIDER = "authentik"
+    SSO_REPO_NAME = "jellyfin-plugin-sso"
+    SSO_REPO_URL = ("https://raw.githubusercontent.com/9p4/jellyfin-plugin-sso/"
+                    "manifest-release/manifest.json")
+    LOGIN_DISCLAIMER = (
+        '<a is="emby-linkbutton" class="raised block emby-button button-submit"'
+        ' href="https://jellyfin.home.bstjohn.net/sso/OID/start/authentik"'
+        ' style="margin-top:1em;">Sign in with Authentik</a>')
+
+    # SchemeOverride is the load-bearing one (#817). Without it the plugin builds
+    # the redirect_uri from Request.Scheme, which is http:// unless Jellyfin
+    # trusts traefik's forwarded headers - and Jellyfin's KnownProxies ignores a
+    # CIDR, so it needs the literal traefik pod IP, which changes on every
+    # reschedule. Authentik matches redirect URIs strictly, so SSO broke.
+    # SchemeOverride (plugin >= 3.5.2.0) forces https regardless, which makes
+    # KnownProxies irrelevant to login. Do not remove it.
+    SSO_DESIRED = {
+        "OidEndpoint": "https://auth.home.bstjohn.net/application/o/jellyfin/",
+        "OidClientId": "jellyfin",
+        "SchemeOverride": "https",
+        "Enabled": True,
+        "EnableAuthorization": True,
+        "EnableAllFolders": True,
+        "EnabledFolders": [],
+        "AdminRoles": [],
+        "Roles": ["media", "all-apps"],
+        "EnableFolderRoles": False,
+        "EnableLiveTvRoles": False,
+        "EnableLiveTv": False,
+        "EnableLiveTvManagement": False,
+        "FolderRoleMapping": [],
+        "RoleClaim": "groups",
+        "OidScopes": ["groups"],
+        "NewPath": True,
+        "DisableHttps": False,
+        "DoNotValidateEndpoints": False,
+        "DoNotValidateIssuerName": False,
+    }
+
+
+    def log(msg):
+        print("reconciler: " + msg, flush=True)
+
+
+    def call(method, path, body=None):
+        data = None
+        headers = {"X-Emby-Token": API_KEY, "Accept": "application/json"}
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(
+            BASE + path, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read()
+        return json.loads(raw) if raw else None
+
+
+    def wait_for_api():
+        # Jellyfin can take many minutes to come up after a restore or a
+        # schema upgrade. Wait indefinitely rather than crash-looping.
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                call("GET", "/System/Info")
+                return
+            except urllib.error.HTTPError as exc:
+                if exc.code in (401, 403):
+                    log("API key rejected (HTTP %d) - recreate the "
+                        "jellyfin-api-key Secret from Dashboard > API Keys"
+                        % exc.code)
+                    time.sleep(INTERVAL)
+                    continue
+                if attempt % 10 == 1:
+                    log("waiting for Jellyfin API (HTTP %d)" % exc.code)
+                time.sleep(10)
+            except Exception as exc:
+                if attempt % 10 == 1:
+                    log("waiting for Jellyfin API (%s)" % exc)
+                time.sleep(10)
+
+
+    def reconcile_scan_schedule():
+        tasks = call("GET", "/ScheduledTasks") or []
+        task = None
+        for candidate in tasks:
+            if candidate.get("Key") == "RefreshLibrary":
+                task = candidate
+                break
+        if task is None:
+            log("WARNING: no scheduled task with Key=RefreshLibrary")
+            return
+        triggers = task.get("Triggers")
+        if triggers is None:
+            detail = call("GET", "/ScheduledTasks/%s" % task["Id"]) or {}
+            triggers = detail.get("Triggers") or []
+        if not triggers:
+            return
+        call("POST", "/ScheduledTasks/%s/Triggers" % task["Id"], [])
+        log("disabled %d trigger(s) on the Scan Media Library task"
+            % len(triggers))
+
+
+    def reconcile_libraries():
+        for folder in call("GET", "/Library/VirtualFolders") or []:
+            name = folder.get("Name", "?")
+            opts = folder.get("LibraryOptions")
+            if not isinstance(opts, dict):
+                log("WARNING: library %r returned no LibraryOptions" % name)
+                continue
+            changed = [k for k, v in ENFORCED.items() if opts.get(k) != v]
+            if not changed:
+                continue
+            # POST replaces LibraryOptions wholesale, so send back the object
+            # we just read (PathInfos, TypeOptions and all) with only these
+            # keys mutated. Never construct a partial body here.
+            opts.update(ENFORCED)
+            call("POST", "/Library/VirtualFolders/LibraryOptions",
+                 {"Id": folder["ItemId"], "LibraryOptions": opts})
+            log("library %r: set %s to false" % (name, ", ".join(sorted(changed))))
+
+
+    def reconcile_plugin_repo():
+        # So a human reinstalling the plugin does not have to find this URL.
+        # POST replaces the list wholesale, so send back what we read.
+        repos = call("GET", "/Repositories") or []
+        if any(r.get("Url") == SSO_REPO_URL for r in repos):
+            return
+        repos.append({"Name": SSO_REPO_NAME, "Url": SSO_REPO_URL,
+                      "Enabled": True})
+        call("POST", "/Repositories", repos)
+        log("registered the %s plugin repository" % SSO_REPO_NAME)
+
+
+    def reconcile_sso_plugin():
+        plugins = call("GET", "/Plugins") or []
+        if not any(p.get("Id") == SSO_PLUGIN_ID for p in plugins):
+            log("WARNING: the SSO-Auth plugin (%s) is NOT installed - Authentik "
+                "login is broken. Dashboard > Plugins > Catalog > SSO-Auth "
+                "(repository %s is registered already), install, then restart."
+                % (SSO_PLUGIN_ID, SSO_REPO_URL))
+            return
+        if not OIDC_SECRET:
+            log("JELLYFIN_OIDC_CLIENT_SECRET is empty - skipping SSO plugin "
+                "config (key JELLYFIN_OIDC_CLIENT_SECRET in authentik-secrets)")
+            return
+        cfg = call("GET", "/Plugins/%s/Configuration" % SSO_PLUGIN_ID) or {}
+        cfg.setdefault("SamlConfigs", {})
+        oid = cfg.setdefault("OidConfigs", {})
+        provider = oid.get(SSO_PROVIDER)
+        if not isinstance(provider, dict):
+            provider = {}
+        desired = dict(SSO_DESIRED, OidSecret=OIDC_SECRET)
+        changed = [k for k, v in desired.items() if provider.get(k) != v]
+        if not changed:
+            return
+        # Merge, do not replace: CanonicalLinks maps usernames to Jellyfin user
+        # IDs and is built by real logins. Dropping it re-links accounts.
+        provider.update(desired)
+        oid[SSO_PROVIDER] = provider
+        call("POST", "/Plugins/%s/Configuration" % SSO_PLUGIN_ID, cfg)
+        # Key names only - never log OidSecret's value.
+        log("SSO provider %r: set %s"
+            % (SSO_PROVIDER, ", ".join(sorted(changed))))
+
+
+    def reconcile_branding():
+        cfg = call("GET", "/System/Configuration/branding") or {}
+        if cfg.get("LoginDisclaimer") == LOGIN_DISCLAIMER:
+            return
+        cfg["LoginDisclaimer"] = LOGIN_DISCLAIMER
+        call("POST", "/System/Configuration/branding", cfg)
+        log("restored the 'Sign in with Authentik' login button")
+
+
+    def main():
+        if not API_KEY:
+            log("JELLYFIN_API_KEY is empty - create the jellyfin-api-key "
+                "Secret (Dashboard > API Keys) and restart the pod. Idling.")
+            while True:
+                time.sleep(3600)
+        wait_for_api()
+        log("Jellyfin API reachable; reconciling every %ds" % INTERVAL)
+        while True:
+            for fn in (reconcile_plugin_repo, reconcile_sso_plugin,
+                       reconcile_branding, reconcile_scan_schedule,
+                       reconcile_libraries):
+                try:
+                    fn()
+                except Exception as exc:
+                    log("%s failed: %s" % (fn.__name__, exc))
+            time.sleep(INTERVAL)
+
+
+    main()

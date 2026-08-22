@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana-github-alerts
+  namespace: default
+  labels:
+    app: grafana-github-alerts
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana-github-alerts
+  template:
+    metadata:
+      labels:
+        app: grafana-github-alerts
+    spec:
+      containers:
+        - name: webhook
+          image: python:3.13.3-alpine3.21
+          command: ["python3", "/app/server.py"]
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-github-token
+                  key: token
+            - name: GITHUB_REPO
+              value: St-John-Software/fleet-infra
+            - name: WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-webhook-shared-secret
+                  key: token
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: script
+              mountPath: /app
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+      volumes:
+        - name: script
+          configMap:
+            name: grafana-github-alerts-script

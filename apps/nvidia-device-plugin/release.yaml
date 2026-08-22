@@ -1,0 +1,58 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: nvidia-device-plugin
+  namespace: flux-system
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: nvidia-device-plugin
+      version: "0.17.0"
+      sourceRef:
+        kind: HelmRepository
+        name: nvidia-device-plugin
+        namespace: flux-system
+      interval: 12h
+  targetNamespace: kube-system
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+  values:
+    # Run the plugin under the nvidia runtime so the container-toolkit hook
+    # injects libnvidia-ml + /dev/nvidia* into the pod. Without this, NVML init
+    # fails and the plugin crashloops with "Incompatible strategy detected auto".
+    # RuntimeClass usability depends on containerd having the runtime registered
+    # (verified at install time by setup-gpu-worker.sh), not on nvidia.com/gpu
+    # already being advertised — there is no chicken-and-egg.
+    runtimeClassName: nvidia
+    # Clear the chart's default nodeAffinity, which requires NFD/GFD labels
+    # (feature.node.kubernetes.io/pci-10de.present, nvidia.com/gpu.present, ...)
+    # that we don't run. We pin to the GPU node via nodeSelector + taint instead.
+    affinity: {}
+    nodeSelector:
+      node-role.kubernetes.io/gpu: "true"
+    tolerations:
+      - key: node-role.kubernetes.io/gpu
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+    # Time-slicing: advertise the single physical GPU as 2 allocatable units of
+    # nvidia.com/gpu so both Ollama and Whisper (each requesting nvidia.com/gpu: 1)
+    # can be scheduled simultaneously. Without this, the device plugin allocates
+    # exclusively and the second pod stays Pending forever. Time-slicing only
+    # changes scheduling — VRAM is still shared cooperatively at runtime, so CUDA
+    # OOM remains possible if both workloads have large models warm at once.
+    config:
+      default: "default"
+      map:
+        default: |-
+          version: v1
+          sharing:
+            timeSlicing:
+              resources:
+                - name: nvidia.com/gpu
+                  replicas: 2

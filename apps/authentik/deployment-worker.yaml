@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authentik-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: authentik-worker
+  template:
+    metadata:
+      labels:
+        app: authentik-worker
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: standard
+      enableServiceLinks: false
+      containers:
+        - name: authentik
+          image: ghcr.io/goauthentik/server:2026.2.1
+          args: ["worker"]
+          ports:
+            - containerPort: 9300
+              name: metrics
+          env:
+            - name: AUTHENTIK_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: AUTHENTIK_SECRET_KEY
+            - name: AUTHENTIK_POSTGRESQL__HOST
+              value: authentik-postgresql
+            - name: AUTHENTIK_POSTGRESQL__USER
+              value: authentik
+            - name: AUTHENTIK_POSTGRESQL__NAME
+              value: authentik
+            - name: AUTHENTIK_POSTGRESQL__PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: PG_PASS
+            - name: MEALIE_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: MEALIE_OIDC_CLIENT_SECRET
+            - name: OPEN_WEBUI_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: OPEN_WEBUI_OIDC_CLIENT_SECRET
+            - name: JELLYFIN_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: JELLYFIN_OIDC_CLIENT_SECRET
+            - name: JELLYSEERR_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: JELLYSEERR_OIDC_CLIENT_SECRET
+            - name: SEERR_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: SEERR_OIDC_CLIENT_SECRET
+            - name: HEADLAMP_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: HEADLAMP_OIDC_CLIENT_SECRET
+            - name: PROXMOX_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: PROXMOX_OIDC_CLIENT_SECRET
+            - name: BIN_SCRAPER_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: BIN_SCRAPER_OIDC_CLIENT_SECRET
+            - name: CLAWS_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: CLAWS_OIDC_CLIENT_SECRET
+            - name: FORGEJO_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: FORGEJO_OIDC_CLIENT_SECRET
+            - name: HOME_ASSISTANT_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: HOME_ASSISTANT_OIDC_CLIENT_SECRET
+          volumeMounts:
+            - name: blueprints
+              mountPath: /blueprints/custom
+          livenessProbe:
+            exec:
+              command: ["ak", "healthcheck"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["ak", "healthcheck"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+      volumes:
+        - name: blueprints
+          configMap:
+            name: authentik-blueprints

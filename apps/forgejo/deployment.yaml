@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forgejo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: forgejo
+  template:
+    metadata:
+      labels:
+        app: forgejo
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: standard
+      enableServiceLinks: false
+      containers:
+        - name: forgejo
+          image: codeberg.org/forgejo/forgejo:15.0.5-rootless
+          ports:
+            - containerPort: 3000
+            - containerPort: 2222
+          env:
+            - name: TZ
+              value: Europe/London
+            - name: FORGEJO__server__DOMAIN
+              value: git.home.bstjohn.net
+            - name: FORGEJO__server__ROOT_URL
+              value: https://git.home.bstjohn.net/
+            - name: FORGEJO__server__SSH_DOMAIN
+              value: git.home.bstjohn.net
+            - name: FORGEJO__server__SSH_PORT
+              value: "30022"
+            - name: FORGEJO__server__SSH_LISTEN_PORT
+              value: "2222"
+            - name: FORGEJO__server__LFS_START_SERVER
+              value: "true"
+            # Mirror policy — see docs/forgejo-mirroring.md
+            # Push mirrors (Forgejo -> GitHub) are the DR path and stay enabled.
+            # Pull mirrors are disabled so a repo can never sync in both
+            # directions; exactly one side is canonical at any time.
+            - name: FORGEJO__mirror__ENABLED
+              value: "true"
+            - name: FORGEJO__mirror__DISABLE_NEW_PULL
+              value: "true"
+            - name: FORGEJO__mirror__DISABLE_NEW_PUSH
+              value: "false"
+            - name: FORGEJO__mirror__DEFAULT_INTERVAL
+              value: "1h"
+            - name: FORGEJO__mirror__MIN_INTERVAL
+              value: "10m"
+            # Forgejo Actions — see docs/forgejo-actions.md
+            # DEFAULT_ACTIONS_URL must be github.com: migrated workflows use
+            # actions/checkout, actions/setup-node, codecov/codecov-action and
+            # aws-actions/configure-aws-credentials, none of which are mirrored
+            # on the default data.forgejo.org.
+            - name: FORGEJO__actions__ENABLED
+              value: "true"
+            - name: FORGEJO__actions__DEFAULT_ACTIONS_URL
+              value: https://github.com
+            # Authentik SSO — the auth source itself lives in Forgejo's DB and is
+            # created by migrations/0019-forgejo-oidc-auth-source.sh. These keys
+            # only control how OAuth2 logins map onto Forgejo accounts.
+            - name: FORGEJO__oauth2_client__ENABLE_AUTO_REGISTRATION
+              value: "true"
+            - name: FORGEJO__oauth2_client__USERNAME
+              value: preferred_username
+            # "login" (not "auto"): on an email clash Forgejo shows a link-account
+            # page so an existing local account is adopted rather than colliding.
+            - name: FORGEJO__oauth2_client__ACCOUNT_LINKING
+              value: login
+            - name: FORGEJO__oauth2_client__UPDATE_AVATAR
+              value: "true"
+            # No mailer is configured — confirmation email would strand new users.
+            - name: FORGEJO__oauth2_client__REGISTER_EMAIL_CONFIRM
+              value: "false"
+            - name: FORGEJO__service__ALLOW_ONLY_EXTERNAL_REGISTRATION
+              value: "true"
+            # Legacy OpenID 2.0 (/user/login/openid) is not Authentik and is unused.
+            - name: FORGEJO__openid__ENABLE_OPENID_SIGNIN
+              value: "false"
+            - name: FORGEJO__openid__ENABLE_OPENID_SIGNUP
+              value: "false"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /api/healthz
+              port: 3000
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /api/healthz
+              port: 3000
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/healthz
+              port: 3000
+            periodSeconds: 15
+          volumeMounts:
+            - mountPath: /var/lib/gitea
+              name: forgejo-data
+      volumes:
+        - name: forgejo-data
+          persistentVolumeClaim:
+            claimName: forgejo-data

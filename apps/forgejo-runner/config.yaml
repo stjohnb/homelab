@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: forgejo-runner-config
+  labels:
+    app: forgejo-runner
+data:
+  config.yml: |
+    log:
+      level: info
+      job_level: info
+
+    runner:
+      # Connection (url/uuid/token) comes from daemon CLI flags fed by the
+      # imperatively-created forgejo-runner-secret. See docs/forgejo-actions.md.
+      file: /data/.runner
+      capacity: 2
+      timeout: 1h
+      shutdown_timeout: 10m
+      insecure: false
+      fetch_timeout: 30s
+      fetch_interval: 5s
+      report_interval: 1s
+      # Forgejo schedules a job here only if EVERY label in the workflow's
+      # runs-on list appears below; the first matching label picks the image.
+      # Existing workflows use runs-on: [self-hosted, linux], so both are needed.
+      labels:
+        - "self-hosted:docker://data.forgejo.org/oci/node:22-bookworm"
+        - "linux:docker://data.forgejo.org/oci/node:22-bookworm"
+        - "docker:docker://data.forgejo.org/oci/node:22-bookworm"
+        - "ubuntu-latest:docker://data.forgejo.org/oci/node:22-bookworm"
+        - "ubuntu-22.04:docker://data.forgejo.org/oci/node:22-bookworm"
+
+    cache:
+      # Disabled: the cache proxy binds in the pod netns and is not reliably
+      # reachable from job containers created by the dind sidecar. No migrated
+      # workflow uses actions/cache yet.
+      enabled: false
+
+    container:
+      network: ""
+      privileged: false
+      options:
+      workdir_parent:
+      valid_volumes: []
+      # "-" = do not mount a docker socket into job containers. The runner
+      # still locates the dind daemon through the DOCKER_HOST env var.
+      docker_host: "-"
+      force_pull: false
+      force_rebuild: false
+
+    host:
+      workdir_parent:

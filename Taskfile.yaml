@@ -1,0 +1,453 @@
+---
+# Taskfile for common cluster operations.
+# Install go-task: https://taskfile.dev/installation/
+# CI reference: .github/workflows/ci.yml
+version: '3'
+
+vars:
+  CLUSTER_PATH: ./clusters/my-cluster
+  FLUX_CRD_SCHEMAS: .task/flux-crd-schemas
+  # Update this list if new Flux Kustomizations are added.
+  KUSTOMIZATIONS: flux-system infrastructure config apps
+
+tasks:
+  default:
+    desc: Run full local validation (lint + kustomize + kubeconform)
+    cmds:
+      - task: validate
+
+  # ---------------------------------------------------------------------------
+  # Validation (mirrors CI pipeline)
+  # ---------------------------------------------------------------------------
+
+  validate:
+    desc: >-
+      Run the full CI pipeline locally (offline checks only;
+      run 'task image-verify' separately to check container image pullability)
+    cmds:
+      - task: lint
+      - task: kustomize-validate
+      - task: kubeconform
+      - task: check-completeness
+      - task: trivyignore-check
+      - task: check-ingress-uniqueness
+      - task: check-image-consistency
+      - task: check-gate-netpol
+      - task: check-image-pull-secrets
+
+  lint:
+    desc: Lint all YAML files
+    preconditions:
+      - sh: command -v yamllint
+        msg: "yamllint not found. Install: pip install yamllint"
+    cmds:
+      - yamllint .
+
+  kustomize-validate:
+    desc: Build and validate all kustomize overlays
+    preconditions:
+      - sh: command -v kustomize
+        msg: "kustomize not found. Install: https://kubectl.docs.kubernetes.io/installation/kustomize/"
+    cmds:
+      - |
+        find . -name kustomization.yaml -exec dirname {} \; | while read -r dir; do
+          echo "Validating $dir"
+          kustomize build "$dir" > /dev/null
+        done
+
+  kubeconform:
+    desc: Validate manifests against Kubernetes and Flux CRD schemas
+    preconditions:
+      - sh: command -v kubeconform
+        msg: "kubeconform not found. Install: https://github.com/yannh/kubeconform"
+      - sh: command -v kustomize
+        msg: "kustomize not found. Install: https://kubectl.docs.kubernetes.io/installation/kustomize/"
+    cmds:
+      - task: setup:flux-schemas
+      - |
+        find . -name kustomization.yaml -exec dirname {} \; | while read -r dir; do
+          echo "Validating $dir"
+          kustomize build "$dir" \
+            | python3 -c 'import sys, yaml; docs=[d for d in yaml.safe_load_all(sys.stdin) if d];
+        [d.pop("sops", None) for d in docs if isinstance(d, dict)];
+        sys.stdout.write(yaml.safe_dump_all(docs))' \
+            | kubeconform -strict \
+              -ignore-missing-schemas \
+              -schema-location default \
+              -schema-location '{{.FLUX_CRD_SCHEMAS}}/{{`{{.Group}}`}}_{{`{{.ResourceKind}}`}}_{{`{{.ResourceAPIVersion}}`}}.json'
+        done
+
+  setup:flux-schemas:
+    desc: Download Flux CRD schemas (cached)
+    internal: true
+    status:
+      - test -d {{.FLUX_CRD_SCHEMAS}}
+    cmds:
+      - mkdir -p {{.FLUX_CRD_SCHEMAS}}
+      - curl -sSL https://github.com/fluxcd/flux2/releases/download/v2.8.3/crd-schemas.tar.gz | tar xz -C {{.FLUX_CRD_SCHEMAS}}
+
+  image-verify:
+    desc: Verify container images in manifests exist in their registries (requires crane)
+    preconditions:
+      - sh: command -v crane
+        msg: "crane not found. Install: go install github.com/google/go-containerregistry/cmd/crane@latest"
+      - sh: command -v kustomize
+        msg: "kustomize not found. Install: https://kubectl.docs.kubernetes.io/installation/kustomize/"
+      - sh: test -x ./scripts/overlays.sh
+        msg: "scripts/overlays.sh missing or not executable"
+    cmds:
+      - |
+        echo "Extracting container images from all overlays..."
+        IMAGES=""
+        for overlay in $(./scripts/overlays.sh | cut -d: -f1); do
+          if [ -d "$overlay" ]; then
+            OVERLAY_IMAGES=$(kustomize build "$overlay" 2>/dev/null \
+              | grep -E '^\s+image:\s' | sed 's/.*image:[[:space:]]*//' \
+              | awk '{print $1}' | tr -d "\"'" || true)
+            if [ -n "$OVERLAY_IMAGES" ]; then
+              IMAGES="${IMAGES:+$IMAGES
+        }$OVERLAY_IMAGES"
+            fi
+          fi
+        done
+        IMAGES=$(echo "$IMAGES" | sort -u)
+
+        if [ -z "$IMAGES" ]; then
+          echo "No images found"
+          exit 0
+        fi
+
+        IMAGE_COUNT=$(echo "$IMAGES" | wc -l)
+        echo "Found $IMAGE_COUNT unique images to verify"
+        echo ""
+
+        FAILED=0; PASSED=0; SKIPPED=0
+        while IFS= read -r IMAGE; do
+          [ -z "$IMAGE" ] && continue
+          printf "  %s ... " "$IMAGE"
+          if crane manifest "$IMAGE" > /dev/null 2>/tmp/crane-err.txt; then
+            echo "✅"
+            PASSED=$((PASSED + 1))
+          elif grep -qi "UNAUTHORIZED\|denied\|403\|401" /tmp/crane-err.txt 2>/dev/null; then
+            echo "⚠️  skipped (auth required)"
+            SKIPPED=$((SKIPPED + 1))
+          else
+            echo "❌ not found"
+            cat /tmp/crane-err.txt 2>/dev/null
+            FAILED=$((FAILED + 1))
+          fi
+        done <<< "$IMAGES"
+
+        echo ""
+        echo "Passed: $PASSED | Failed: $FAILED | Skipped: $SKIPPED"
+        if [ $FAILED -gt 0 ]; then
+          echo "❌ Some images could not be verified"
+          exit 1
+        fi
+        echo "✅ All images verified"
+
+  check-completeness:
+    desc: Check that all service directories are listed in their parent kustomization.yaml
+    preconditions:
+      - sh: command -v yq
+        msg: "yq not found. Install: https://github.com/mikefarah/yq#install"
+    cmds:
+      - ./scripts/check-completeness.sh
+
+  trivyignore-check:
+    desc: Validate .trivyignore governance (expiry dates, format, upstream links)
+    cmds:
+      - ./scripts/check-trivyignore.sh
+
+  check-ingress-uniqueness:
+    desc: Check that no two Ingress/IngressRoute resources claim the same hostname
+    preconditions:
+      - sh: command -v yq
+        msg: "yq not found. Install: https://github.com/mikefarah/yq#install"
+      - sh: command -v kustomize
+        msg: "kustomize not found. Install: https://kubectl.docs.kubernetes.io/installation/kustomize/"
+    cmds:
+      - ./scripts/check-ingress-uniqueness.sh
+
+  check-image-consistency:
+    desc: Check that no service directory pins the same image to two different tags
+    cmds:
+      - ./scripts/check-image-tag-consistency.sh
+
+  check-gate-netpol:
+    desc: Check that truenas-gate-fronted services allow ingress from the gate
+    preconditions:
+      - sh: command -v yq
+        msg: "yq not found. Install: https://github.com/mikefarah/yq#install"
+      - sh: command -v kustomize
+        msg: "kustomize not found. Install: https://kubectl.docs.kubernetes.io/installation/kustomize/"
+    cmds:
+      - ./scripts/check-gate-netpol.sh
+
+  check-image-pull-secrets:
+    desc: Check that every imagePullSecrets reference resolves to a declared Secret
+    preconditions:
+      - sh: command -v yq
+        msg: "yq not found. Install: https://github.com/mikefarah/yq#install"
+      - sh: command -v kustomize
+        msg: "kustomize not found. Install: https://kubectl.docs.kubernetes.io/installation/kustomize/"
+    cmds:
+      - ./scripts/check-image-pull-secrets.sh
+
+  renovate-check:
+    desc: Validate Renovate config and check file coverage
+    cmds:
+      - |
+        if ! command -v npx > /dev/null 2>&1; then
+          echo "npx not found — skipping Renovate config validation."
+          echo "Install Node.js to enable: https://nodejs.org/"
+          exit 0
+        fi
+        echo "==> Validating renovate.json syntax..."
+        npx --yes --package renovate -- renovate-config-validator
+        echo "✓ Renovate config is valid"
+      - |
+        # Phase 2: Check that all dependency-bearing files are covered by
+        # Renovate fileMatch patterns for their respective managers.
+        if ! command -v python3 > /dev/null 2>&1; then
+          echo "python3 not found — skipping file coverage check."
+          echo "Install Python 3 to enable: https://python.org/"
+          exit 0
+        fi
+
+        echo ""
+        echo "==> Checking Renovate file coverage..."
+        echo ""
+
+        # Parse fileMatch patterns and ignorePaths from renovate.json.
+        # NOTE: fileMatch patterns must be POSIX ERE-compatible (no
+        # lookaheads, (?:...), etc.) since we match them with grep -E.
+        # Output format: "manager<TAB>pattern" per line.
+        RENOVATE_INFO=$(python3 -c "
+        import json
+        with open('renovate.json') as f:
+            cfg = json.load(f)
+        for mgr in ('kubernetes', 'flux', 'dockerfile'):
+            for p in cfg.get(mgr, {}).get('fileMatch', []):
+                print(mgr + '\t' + p)
+        for p in cfg.get('ignorePaths', []):
+            print('ignore\t' + p)
+        ") || { echo "ERROR: Failed to parse renovate.json"; exit 1; }
+
+        KUBERNETES_PATTERNS=()
+        FLUX_PATTERNS=()
+        DOCKERFILE_PATTERNS=()
+        IGNORE_PATHS=()
+
+        while IFS=$'\t' read -r key value; do
+          [ -z "$key" ] && continue
+          case "$key" in
+            kubernetes) KUBERNETES_PATTERNS+=("$value") ;;
+            flux) FLUX_PATTERNS+=("$value") ;;
+            dockerfile) DOCKERFILE_PATTERNS+=("$value") ;;
+            ignore) IGNORE_PATHS+=("$value") ;;
+          esac
+        done <<< "$RENOVATE_INFO"
+
+        # Renovate built-in defaults (verified against Renovate v39, 2026-03).
+        # Active when config:recommended is extended (enables all managers).
+        DOCKERFILE_PATTERNS+=('(^|/)Dockerfile$' '(^|/)Dockerfile\.[^/]+$')
+
+        # Check if a file path is intentionally excluded via ignorePaths.
+        # Uses python3 fnmatch for better compatibility with Renovate's
+        # minimatch patterns (e.g. **/node_modules/**). Note: fnmatch is
+        # more permissive than minimatch (* crosses path separators), so
+        # this may over-match — safe direction for an ignore check.
+        is_ignored() {
+          local file="$1"
+          [ ${#IGNORE_PATHS[@]} -eq 0 ] && return 1
+          python3 -c "
+        import fnmatch, sys
+        path, patterns = sys.argv[1], sys.argv[2:]
+        sys.exit(0 if any(fnmatch.fnmatch(path, p) for p in patterns) else 1)
+        " "$file" "${IGNORE_PATHS[@]}"
+        }
+
+        # Check if a file path matches any regex pattern.
+        # Note: uses grep -E (POSIX ERE), not JS regex. For the simple
+        # patterns in this repo there is no behavioral difference.
+        matches_any() {
+          local file="$1"; shift
+          for pat in "$@"; do
+            echo "$file" | grep -qE "$pat" && return 0
+          done
+          return 1
+        }
+
+        UNCOVERED=()
+
+        # --- Dockerfiles ---
+        # Exclude tooling directories that never contain deployable content.
+        # Content directories (docs/, ideas/) are not excluded here — if they
+        # contain Dockerfiles, is_ignored will check against Renovate's
+        # ignorePaths, keeping exclusion logic in one place.
+        mapfile -t DOCKERFILES < <(find . \( -name 'Dockerfile' -o -name 'Dockerfile.*' \) \
+          -not -path './.git/*' -not -path './.github/*' \
+          -not -path './.task/*' 2>/dev/null | sed 's|^\./||' | sort)
+        echo "Checking ${#DOCKERFILES[@]} Dockerfile(s)..."
+
+        for file in "${DOCKERFILES[@]}"; do
+          [ -z "$file" ] && continue
+          is_ignored "$file" && continue
+          matches_any "$file" "${DOCKERFILE_PATTERNS[@]}" && continue
+          UNCOVERED+=("$file  (no dockerfile fileMatch covers this path)")
+        done
+
+        # --- YAML files with image: references (kubernetes manager) ---
+        # Search only apps/ and clusters/ to avoid false positives from
+        # non-manifest files (e.g. Taskfile.yaml, scripts).
+        mapfile -t IMAGE_YAMLS < <({ grep -rlE '^[[:space:]]+image:[[:space:]]' --include='*.yaml' --include='*.yml' \
+          apps/ clusters/ 2>/dev/null || true; } | sort)
+        echo "Checking ${#IMAGE_YAMLS[@]} YAML files with image references..."
+
+        for file in "${IMAGE_YAMLS[@]}"; do
+          [ -z "$file" ] && continue
+          is_ignored "$file" && continue
+          if [ ${#KUBERNETES_PATTERNS[@]} -eq 0 ] || \
+             ! matches_any "$file" "${KUBERNETES_PATTERNS[@]}"; then
+            UNCOVERED+=("$file  (no kubernetes fileMatch covers this path)")
+          fi
+        done
+
+        # --- YAML files with HelmRelease (flux manager) ---
+        mapfile -t HELM_YAMLS < <({ grep -rl 'kind: HelmRelease' --include='*.yaml' --include='*.yml' \
+          apps/ clusters/ 2>/dev/null || true; } | sort)
+        echo "Checking ${#HELM_YAMLS[@]} YAML files with HelmRelease resources..."
+
+        for file in "${HELM_YAMLS[@]}"; do
+          [ -z "$file" ] && continue
+          is_ignored "$file" && continue
+          if [ ${#FLUX_PATTERNS[@]} -eq 0 ] || \
+             ! matches_any "$file" "${FLUX_PATTERNS[@]}"; then
+            UNCOVERED+=("$file  (no flux fileMatch covers this path)")
+          fi
+        done
+
+        # --- Report ---
+        echo ""
+        if [ ${#UNCOVERED[@]} -gt 0 ]; then
+          echo "WARNING: ${#UNCOVERED[@]} file(s) not covered by Renovate fileMatch patterns:"
+          for item in "${UNCOVERED[@]}"; do
+            echo "  $item"
+          done
+          echo ""
+          echo "Tip: Add matching fileMatch patterns to renovate.json"
+          exit 1
+        else
+          echo "✓ All dependency files are covered by Renovate fileMatch patterns"
+        fi
+
+  # ---------------------------------------------------------------------------
+  # Cluster status (read-only)
+  # ---------------------------------------------------------------------------
+
+  status:
+    desc: Show all Flux resources
+    preconditions:
+      - sh: command -v flux
+        msg: "flux CLI not found. Install: https://fluxcd.io/flux/installation/"
+    cmds:
+      - flux get all -A
+
+  status:hr:
+    desc: Show HelmRelease status
+    preconditions:
+      - sh: command -v flux
+        msg: "flux CLI not found. Install: https://fluxcd.io/flux/installation/"
+    cmds:
+      - flux get helmreleases -A
+
+  status:ks:
+    desc: Show Kustomization status
+    preconditions:
+      - sh: command -v flux
+        msg: "flux CLI not found. Install: https://fluxcd.io/flux/installation/"
+    cmds:
+      - flux get kustomizations -A
+
+  status:sources:
+    desc: Show all source status
+    preconditions:
+      - sh: command -v flux
+        msg: "flux CLI not found. Install: https://fluxcd.io/flux/installation/"
+    cmds:
+      - flux get sources all -A
+
+  # ---------------------------------------------------------------------------
+  # Logs
+  # ---------------------------------------------------------------------------
+
+  logs:
+    desc: Tail all Flux controller logs
+    preconditions:
+      - sh: command -v flux
+        msg: "flux CLI not found. Install: https://fluxcd.io/flux/installation/"
+    cmds:
+      - flux logs --all-namespaces -f
+
+  logs:source:
+    desc: Tail source-controller logs
+    preconditions:
+      - sh: command -v flux
+        msg: "flux CLI not found. Install: https://fluxcd.io/flux/installation/"
+    cmds:
+      - flux logs --kind=source-controller -f
+
+  logs:kustomize:
+    desc: Tail kustomize-controller logs
+    preconditions:
+      - sh: command -v flux
+        msg: "flux CLI not found. Install: https://fluxcd.io/flux/installation/"
+    cmds:
+      - flux logs --kind=kustomize-controller -f
+
+  logs:helm:
+    desc: Tail helm-controller logs
+    preconditions:
+      - sh: command -v flux
+        msg: "flux CLI not found. Install: https://fluxcd.io/flux/installation/"
+    cmds:
+      - flux logs --kind=helm-controller -f
+
+  # ---------------------------------------------------------------------------
+  # Cluster operations (mutating)
+  # ---------------------------------------------------------------------------
+
+  reconcile:
+    desc: Force immediate reconciliation of all Flux resources
+    preconditions:
+      - sh: command -v flux
+        msg: "flux CLI not found. Install: https://fluxcd.io/flux/installation/"
+    cmds:
+      - flux reconcile kustomization flux-system --with-source
+
+  suspend:
+    desc: Suspend reconciliation of all kustomizations
+    preconditions:
+      - sh: command -v flux
+        msg: "flux CLI not found. Install: https://fluxcd.io/flux/installation/"
+    cmds:
+      - for: {var: KUSTOMIZATIONS}
+        cmd: flux suspend kustomization {{.ITEM}}
+
+  resume:
+    desc: Resume reconciliation of all kustomizations
+    preconditions:
+      - sh: command -v flux
+        msg: "flux CLI not found. Install: https://fluxcd.io/flux/installation/"
+    cmds:
+      - for: {var: KUSTOMIZATIONS}
+        cmd: flux resume kustomization {{.ITEM}}
+
+  diff:
+    desc: Preview what Flux would apply (root kustomization only)
+    preconditions:
+      - sh: command -v flux
+        msg: "flux CLI not found. Install: https://fluxcd.io/flux/installation/"
+    cmds:
+      - flux diff kustomization flux-system --path={{.CLUSTER_PATH}}

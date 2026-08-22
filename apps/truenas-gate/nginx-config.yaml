@@ -1,0 +1,139 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: truenas-gate-nginx-config
+data:
+  nginx.conf: |
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        # Upstream backends
+        upstream immich {
+            server immich:2283;
+        }
+        upstream plex {
+            server plex:32400;
+        }
+        upstream transmission {
+            server transmission:9091;
+        }
+
+        # Shared proxy settings
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+
+        server {
+            listen 80;
+            server_name immich.home.bstjohn.net;
+
+            # Serve wake page on proxy failure
+            error_page 502 503 504 =503 @gate;
+
+            # Wake-webhook proxy; real HA webhook URL comes from the
+            # SOPS-encrypted Secret truenas-gate-wake-webhook so it is
+            # never committed in plaintext (this repo has a public mirror).
+            include /etc/nginx/wake/wake-webhook.conf;
+
+            location / {
+                proxy_pass http://immich;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_intercept_errors on;
+            }
+
+            location @gate {
+                root /usr/share/nginx/html;
+                try_files /index.html =503;
+            }
+        }
+
+        server {
+            listen 80;
+            server_name plex.home.bstjohn.net;
+
+            error_page 502 503 504 =503 @gate;
+
+            # Wake-webhook proxy; real HA webhook URL comes from the
+            # SOPS-encrypted Secret truenas-gate-wake-webhook so it is
+            # never committed in plaintext (this repo has a public mirror).
+            include /etc/nginx/wake/wake-webhook.conf;
+
+            location / {
+                proxy_pass http://plex;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_intercept_errors on;
+            }
+
+            location @gate {
+                root /usr/share/nginx/html;
+                try_files /index.html =503;
+            }
+        }
+
+        server {
+            listen 80;
+            server_name transmission.home.bstjohn.net;
+
+            error_page 502 503 504 =503 @gate;
+
+            # Wake-webhook proxy; real HA webhook URL comes from the
+            # SOPS-encrypted Secret truenas-gate-wake-webhook so it is
+            # never committed in plaintext (this repo has a public mirror).
+            include /etc/nginx/wake/wake-webhook.conf;
+
+            location / {
+                proxy_pass http://transmission;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_intercept_errors on;
+            }
+
+            location @gate {
+                root /usr/share/nginx/html;
+                try_files /index.html =503;
+            }
+        }
+
+        # Always-on wake page. Plex and Jellyfin no longer fall through to
+        # @gate when the NAS sleeps (they stay up on k3s and fail playback
+        # with EIO instead), so the wake button needs a hostname of its own.
+        server {
+            listen 80;
+            server_name wake.home.bstjohn.net;
+
+            # Wake-webhook proxy; real HA webhook URL comes from the
+            # SOPS-encrypted Secret truenas-gate-wake-webhook so it is
+            # never committed in plaintext (this repo has a public mirror).
+            include /etc/nginx/wake/wake-webhook.conf;
+
+            location / {
+                root /usr/share/nginx/html;
+                try_files /index.html =503;
+            }
+        }
+
+        # Default server for direct access to gate
+        server {
+            listen 80 default_server;
+            root /usr/share/nginx/html;
+
+            # Wake-webhook proxy; real HA webhook URL comes from the
+            # SOPS-encrypted Secret truenas-gate-wake-webhook so it is
+            # never committed in plaintext (this repo has a public mirror).
+            include /etc/nginx/wake/wake-webhook.conf;
+
+            location / {
+                try_files $uri /index.html;
+            }
+        }
+    }

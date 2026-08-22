@@ -1,0 +1,227 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: immich
+  labels:
+    app: immich
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: immich
+  template:
+    metadata:
+      labels:
+        app: immich
+        component: server
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: standard
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 90
+      # Pinned to the storage node (k3s-nas). The NAS is powered off most of
+      # the time and this service is pointless without its media, so it must
+      # fail cleanly here rather than run without storage. See docs/nas-k3s.md.
+      nodeSelector:
+        node-role.kubernetes.io/storage: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/storage
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: immich-server
+          image: ghcr.io/immich-app/immich-server:v2.5.6
+          ports:
+            - containerPort: 2283
+          env:
+            - name: DB_HOSTNAME
+              value: localhost
+            - name: DB_DATABASE_NAME
+              value: immich
+            - name: DB_USERNAME
+              value: immich
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: immich-db-secret
+                  key: password
+            - name: REDIS_HOSTNAME
+              value: localhost
+            - name: IMMICH_MACHINE_LEARNING_URL
+              value: "http://localhost:3003"
+            - name: TZ
+              value: Europe/London
+          volumeMounts:
+            - name: media
+              mountPath: /usr/src/app/upload
+              subPath: photos
+          startupProbe:
+            httpGet:
+              path: /api/server/ping
+              port: 2283
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /api/server/ping
+              port: 2283
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/server/ping
+              port: 2283
+            initialDelaySeconds: 60
+            periodSeconds: 60
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 4Gi
+
+        - name: immich-machine-learning
+          image: ghcr.io/immich-app/immich-machine-learning:v2.5.6
+          ports:
+            - containerPort: 3003
+          env:
+            - name: TZ
+              value: Europe/London
+            # Preload models on startup to avoid cold-start latency
+            - name: MACHINE_LEARNING_PRELOAD__CLIP
+              value: ViT-B-32__openai
+            - name: MACHINE_LEARNING_PRELOAD__FACE
+              value: buffalo_l
+            # Keep models in memory for 1 hour (default 5 min causes frequent reloads)
+            - name: MACHINE_LEARNING_CACHE_TIMEOUT
+              value: "3600"
+          volumeMounts:
+            - name: ml-cache
+              mountPath: /cache
+          # Startup probe: give container up to 5 minutes to load models
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: 3003
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 27
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 3003
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 3003
+            initialDelaySeconds: 10
+            periodSeconds: 60
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 4000m
+              memory: 4Gi
+
+        - name: postgres
+          image: tensorchord/pgvecto-rs:pg16-v0.2.0
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: immich
+            - name: POSTGRES_USER
+              value: immich
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: immich-db-secret
+                  key: password
+            - name: TZ
+              value: Europe/London
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          startupProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - immich
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - immich
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+
+        - name: valkey
+          image: valkey/valkey:8.0.2-alpine
+          ports:
+            - containerPort: 6379
+          env:
+            - name: TZ
+              value: Europe/London
+          startupProbe:
+            exec:
+              command:
+                - valkey-cli
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+          readinessProbe:
+            exec:
+              command:
+                - valkey-cli
+                - ping
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+      volumes:
+        - name: media
+          persistentVolumeClaim:
+            claimName: media-pvc
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: immich-postgres-pvc
+        - name: ml-cache
+          persistentVolumeClaim:
+            claimName: immich-ml-cache-pvc

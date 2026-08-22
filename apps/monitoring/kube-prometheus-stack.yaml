@@ -1,0 +1,2240 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: kube-prometheus-stack
+  namespace: default
+spec:
+  interval: 30m
+  # disableWait on all three actions: Helm's --wait gates on every resource in
+  # the release, including the prometheus-node-exporter DaemonSet. Helm needs
+  # numberReady >= desired - maxUnavailable (3 - 1 = 2). With one worker off
+  # that holds (numberReady 2); with BOTH `ryzen` (GPU) and `k3s-nas` (storage)
+  # off — the normal overnight state — numberReady drops to 1 and the check can
+  # never pass, so every upgrade blocked for the full 20m and failed, then the
+  # rollback blocked on the same DaemonSet and failed too. Health is covered by
+  # Gatus probes of the Grafana and Prometheus endpoints instead.
+  # See docs/monitoring.md.
+  install:
+    disableWait: true
+    remediation:
+      retries: 3
+  upgrade:
+    timeout: 20m
+    disableWait: true
+    remediation:
+      retries: 3
+  rollback:
+    timeout: 20m
+    disableWait: true
+  chart:
+    spec:
+      chart: kube-prometheus-stack
+      version: "72.9.1"
+      sourceRef:
+        kind: HelmRepository
+        name: prometheus-community
+        namespace: flux-system
+      interval: 12h
+  values:
+    # --- Grafana ---
+    grafana:
+      priorityClassName: critical-infrastructure
+      enabled: true
+      # Disable init-chown-data container — it fails on existing PVCs when
+      # subdirectories (csv, png, pdf) already exist with different ownership.
+      # Safe to disable with local-path storage.
+      initChownData:
+        enabled: false
+      admin:
+        existingSecret: grafana-admin-secret
+        userKey: admin-user
+        passwordKey: admin-password
+      persistence:
+        enabled: true
+        storageClassName: local-path
+        size: 5Gi
+      dashboardProviders:
+        dashboardproviders.yaml:
+          apiVersion: 1
+          providers:
+            - name: custom
+              orgId: 1
+              folder: Custom
+              type: file
+              disableDeletion: false
+              editable: true
+              options:
+                path: /var/lib/grafana/dashboards/custom
+      dashboards:
+        custom:
+          proxmox:
+            gnetId: 10347
+            revision: 5
+            datasource: Prometheus
+      sidecar:
+        dashboards:
+          enabled: true
+          label: grafana_dashboard
+          folderAnnotation: grafana_folder
+          provider:
+            foldersFromFilesStructure: true
+      envValueFrom:
+        SLACK_WEBHOOK_URL:
+          secretKeyRef:
+            name: grafana-slack-webhook
+            key: webhook-url
+            optional: true
+        GRAFANA_GITHUB_WEBHOOK_TOKEN:
+          secretKeyRef:
+            name: grafana-webhook-shared-secret
+            key: token
+      alerting:
+        contactpoints.yaml:
+          apiVersion: 1
+          contactPoints:
+            - orgId: 1
+              name: Slack - PVC
+              receivers:
+                - uid: slack-pvc
+                  type: slack
+                  settings:
+                    url: $__env{SLACK_WEBHOOK_URL}
+                  disableResolveMessage: false
+            - orgId: 1
+              name: Slack - CronJobs
+              receivers:
+                - uid: slack-cronjob-alerts
+                  type: slack
+                  settings:
+                    url: $__env{SLACK_WEBHOOK_URL}
+                  disableResolveMessage: false
+            - orgId: 1
+              name: GitHub Issues
+              receivers:
+                - uid: github-issues
+                  type: webhook
+                  settings:
+                    url: http://grafana-github-alerts.default.svc.cluster.local:8080/webhook
+                    httpMethod: POST
+                    authorization_scheme: Bearer
+                    authorization_credentials: $__env{GRAFANA_GITHUB_WEBHOOK_TOKEN}
+                  disableResolveMessage: false
+            - orgId: 1
+              name: Slack - Node
+              receivers:
+                - uid: slack-node-alerts
+                  type: slack
+                  settings:
+                    url: $__env{SLACK_WEBHOOK_URL}
+                  disableResolveMessage: false
+            - orgId: 1
+              name: Slack - Proxmox
+              receivers:
+                - uid: slack-proxmox-alerts
+                  type: slack
+                  settings:
+                    url: $__env{SLACK_WEBHOOK_URL}
+                  disableResolveMessage: false
+            - orgId: 1
+              name: Slack - DNS
+              receivers:
+                - uid: slack-dns-alerts
+                  type: slack
+                  settings:
+                    url: $__env{SLACK_WEBHOOK_URL}
+                  disableResolveMessage: false
+        policies.yaml:
+          apiVersion: 1
+          policies:
+            - orgId: 1
+              receiver: grafana-default-email
+              group_by:
+                - grafana_folder
+                - alertname
+              routes:
+                # Terminal route (no `continue`) — evaluation stops here, so this known
+                # standing condition never reaches the GitHub Issues webhook. Slack only,
+                # re-notified monthly, and always visible in the Grafana Alerting UI.
+                - receiver: Slack - CronJobs
+                  object_matchers:
+                    - ["alertname", "=~", "^Immich Database Is Empty$"]
+                  group_by:
+                    - alertname
+                  group_wait: 30s
+                  group_interval: 1h
+                  repeat_interval: 720h
+                - receiver: GitHub Issues
+                  group_by:
+                    - alertname
+                  group_wait: 1m
+                  group_interval: 5m
+                  repeat_interval: 24h
+                  continue: true
+                  object_matchers:
+                    - ["alertname", "!~", "KubeNodeNotReady|KubeNodeUnreachable|KubeletDown"]
+                - receiver: Slack - PVC
+                  object_matchers:
+                    - ["alertname", "=~", "PVC.*"]
+                  group_by:
+                    - namespace
+                    - persistentvolumeclaim
+                  group_wait: 30s
+                  group_interval: 5m
+                  repeat_interval: 4h
+                - receiver: Slack - Node
+                  object_matchers:
+                    - ["alertname", "=~", "Node.*"]
+                  group_by:
+                    - alertname
+                    - node
+                  group_wait: 30s
+                  group_interval: 5m
+                  repeat_interval: 4h
+                - receiver: Slack - Proxmox
+                  object_matchers:
+                    - ["alertname", "=~", "Proxmox.*"]
+                  group_by:
+                    - alertname
+                  group_wait: 30s
+                  group_interval: 5m
+                  repeat_interval: 4h
+                - receiver: Slack - CronJobs
+                  object_matchers:
+                    - ["alertname", "=~", ".*Job.*|.*Schedule.*|.*Running Too Long"]
+                  group_by:
+                    - alertname
+                  group_wait: 30s
+                  group_interval: 5m
+                  repeat_interval: 4h
+                - receiver: Slack - DNS
+                  object_matchers:
+                    - ["alertname", "=~", "^CoreDNS.*"]
+                  group_by:
+                    - alertname
+                  group_wait: 30s
+                  group_interval: 5m
+                  repeat_interval: 4h
+        rules.yaml:
+          apiVersion: 1
+          groups:
+            - orgId: 1
+              name: PVC Capacity
+              folder: Alerts
+              interval: 5m
+              rules:
+                - uid: pvc-warning
+                  title: PVC Usage Warning (80%)
+                  condition: C
+                  for: 10m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: >-
+                      PVC {{ "{{" }} $labels.persistentvolumeclaim {{ "}}" }} in {{ "{{" }} $labels.namespace {{ "}}" }}
+                      is {{ "{{" }} printf "%.1f" $values.B.Value {{ "}}" }}% full
+                  data:
+                    - refId: A
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (
+                            kubelet_volume_stats_used_bytes
+                            / kubelet_volume_stats_capacity_bytes
+                          )
+                          * on(namespace, persistentvolumeclaim) group_left(storageclass)
+                            kube_persistentvolumeclaim_info{storageclass="local-path"}
+                          * 100
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params: []
+                              type: gt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - B
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: A
+                        reducer: last
+                        refId: B
+                        type: reduce
+                    - refId: C
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params:
+                                - 80
+                              type: gt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - C
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: B
+                        refId: C
+                        threshold:
+                          conditions:
+                            - evaluator:
+                                params:
+                                  - 80
+                                type: gt
+                        type: threshold
+                - uid: pvc-critical
+                  title: PVC Usage Critical (90%)
+                  condition: C
+                  for: 5m
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: >-
+                      PVC {{ "{{" }} $labels.persistentvolumeclaim {{ "}}" }} in {{ "{{" }} $labels.namespace {{ "}}" }}
+                      is {{ "{{" }} printf "%.1f" $values.B.Value {{ "}}" }}% full — immediate action required
+                  data:
+                    - refId: A
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (
+                            kubelet_volume_stats_used_bytes
+                            / kubelet_volume_stats_capacity_bytes
+                          )
+                          * on(namespace, persistentvolumeclaim) group_left(storageclass)
+                            kube_persistentvolumeclaim_info{storageclass="local-path"}
+                          * 100
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params: []
+                              type: gt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - B
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: A
+                        reducer: last
+                        refId: B
+                        type: reduce
+                    - refId: C
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params:
+                                - 90
+                              type: gt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - C
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: B
+                        refId: C
+                        threshold:
+                          conditions:
+                            - evaluator:
+                                params:
+                                  - 90
+                                type: gt
+                        type: threshold
+            - orgId: 1
+              name: CronJob Monitoring
+              folder: Alerts
+              interval: 1m
+              rules:
+                - uid: immich-db-backup-job-failed
+                  title: Immich DB Backup Job Failed
+                  condition: B
+                  for: 5m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: Immich DB backup job has failed
+                    description: >-
+                      The most recent immich-db-backup job failed for a reason other than the
+                      NFS mount deadline or an empty database — the backup container ran and
+                      either could not reach Postgres, produced a dump pg_restore --list cannot
+                      read, produced a dump whose TOC is missing public.asset or public.user, or
+                      produced a dump at or below the 17 MB geodata-only floor.
+                      Check `kubectl logs -l component=db-backup`.
+                      Existing backups were not rotated, so the last good dump is intact.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (kube_job_status_failed{namespace="default",
+                          job_name=~"immich-db-backup-[0-9]+",
+                          reason!~"DeadlineExceeded|PodFailurePolicy"} > 0)
+                          and on(job_name, namespace)
+                          topk(1, kube_job_status_start_time{namespace="default",
+                          job_name=~"immich-db-backup-[0-9]+"})
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 0
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: immich-db-empty
+                  title: Immich Database Is Empty
+                  condition: B
+                  for: 30m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: Immich database is empty — backup refused, manual recovery needed
+                    description: >-
+                      immich-db-backup refused to dump because `select count(*) from asset` and
+                      `select count(*) from "user"` are both 0 (container exit 3, Job failure
+                      reason PodFailurePolicy). This is a known standing condition, not a backup
+                      malfunction: immich-postgres-pvc is node-local local-path storage, was lost
+                      when the k3s worker VM was rebuilt on 2026-04-09/10, and no dump or PVC copy
+                      predates that loss. The photo and video files survived on NFS — 34 GB under
+                      /mnt/SSD-POOL/media/photos/upload, owner UUID
+                      409b90bd-2559-4d4f-ace2-57de6f137703. Recovery is manual: create a fresh
+                      admin user in Immich, then re-import those orphaned files. Existing backups
+                      were not rotated. See docs/immich.md.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (kube_job_status_failed{namespace="default",
+                          job_name=~"immich-db-backup-[0-9]+", reason="PodFailurePolicy"} > 0)
+                          and on(job_name, namespace)
+                          topk(1, kube_job_status_start_time{namespace="default",
+                          job_name=~"immich-db-backup-[0-9]+"})
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 0
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: immich-db-backup-duration-exceeded
+                  title: Immich DB Backup Running Too Long
+                  condition: B
+                  for: 0s
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: Immich DB backup job has been running for over 10 minutes
+                    description: >-
+                      An immich-db-backup job has been running for more than 10 minutes.
+                      When the NAS is offline, the pod waits up to 30 minutes for the NFS mount
+                      before timing out — this is expected. If the NAS is online, check pod logs
+                      for a hung pg_dump, database locks, or resource exhaustion.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (time() - kube_job_status_start_time{namespace="default",
+                          job_name=~"immich-db-backup-[0-9]+"}) and on(job_name, namespace)
+                          (kube_job_status_active{namespace="default",
+                          job_name=~"immich-db-backup-[0-9]+"} > 0)
+                          and on()
+                          (kube_node_status_condition{node="k3s-nas",
+                          condition="Ready", status="true"} == 1)
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 600
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: containerd-gc-job-failed
+                  title: Containerd GC Job Failed
+                  condition: B
+                  for: 1m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: Containerd GC job has failed
+                    description: >-
+                      A failed job was detected for the containerd-gc CronJob.
+                      Unresolved failures will eventually lead to disk exhaustion from accumulated container images.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          kube_job_status_failed{namespace="default",
+                          job_name=~"containerd-gc-[0-9]+"}
+                          and on(job_name, namespace)
+                          topk(1, kube_job_status_start_time{namespace="default",
+                          job_name=~"containerd-gc-[0-9]+"})
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 0
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: containerd-gc-storage-job-failed
+                  title: Containerd GC Storage Job Failed
+                  condition: B
+                  for: 5m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: Containerd GC storage job has failed
+                    description: >-
+                      A failed job was detected for the containerd-gc-storage CronJob
+                      while the NAS storage node (k3s-nas) has been continuously Ready
+                      for at least 26 hours (i.e. at least one scheduled run elapsed under
+                      healthy conditions). Unresolved failures will eventually lead to disk
+                      exhaustion from accumulated container images on the storage node.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (kube_job_status_failed{namespace="default",
+                          job_name=~"containerd-gc-storage-[0-9]+"}
+                          and on(job_name, namespace)
+                          topk(1, kube_job_status_start_time{namespace="default",
+                          job_name=~"containerd-gc-storage-[0-9]+"})
+                          )
+                          and on()
+                          (min_over_time((max by (node) (kube_node_status_condition{node="k3s-nas",
+                          condition="Ready", status="true"}))[26h:1m]) == 1)
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 0
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: immich-db-backup-schedule-missed
+                  title: Immich DB Backup Schedule Missed
+                  condition: B
+                  for: 5m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: Immich DB backup has not run in over 12 hours
+                    description: >-
+                      The immich-db-backup CronJob has not produced a new job in more than 12 hours
+                      (2x its 6-hour interval). The CronJob may be suspended or the scheduler may have failed.
+                      Before the first scheduled run this is measured from the CronJob's creation
+                      timestamp, so a CronJob that never schedules at all still alerts.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (time() - max by (cronjob) (kube_cronjob_status_last_schedule_time{cronjob="immich-db-backup",
+                          namespace="default"} > 0))
+                          or
+                          (time() - max by (cronjob) (kube_cronjob_created{cronjob="immich-db-backup",
+                          namespace="default"}))
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 43200
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: containerd-gc-schedule-missed
+                  title: Containerd GC Schedule Missed
+                  condition: B
+                  for: 5m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: Containerd GC has not run in over 2 days
+                    description: >-
+                      The containerd-gc or containerd-gc-storage CronJob has not produced a new job in more than 2 days
+                      (2x its daily interval). The CronJob may be suspended or the scheduler may have failed.
+                      Prolonged failure leads to disk exhaustion. Before the first scheduled run this is
+                      measured from the CronJob's creation timestamp, so a CronJob that never schedules
+                      at all still alerts.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (time() - max by (cronjob) (kube_cronjob_status_last_schedule_time{cronjob=~"containerd-gc(-storage)?",
+                          namespace="default"} > 0))
+                          or
+                          (time() - max by (cronjob) (kube_cronjob_created{cronjob=~"containerd-gc(-storage)?",
+                          namespace="default"}))
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 172800
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: forgejo-backup-job-failed
+                  title: Forgejo Backup Job Failed
+                  condition: B
+                  for: 5m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: Forgejo nightly backup job has failed
+                    description: >-
+                      A failed job was detected for the forgejo-backup CronJob — either
+                      `forgejo dump` errored or content verification rejected the archive.
+                      This job writes to a local-path PVC on the 24/7 node and has no NFS
+                      dependency, so any failure is real: Forgejo has no fresh backup.
+                      See docs/forgejo-backups.md.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          kube_job_status_failed{namespace="default",
+                          job_name=~"forgejo-backup-[0-9]+"}
+                          and on(job_name, namespace)
+                          topk(1, kube_job_status_start_time{namespace="default",
+                          job_name=~"forgejo-backup-[0-9]+"})
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 0
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: forgejo-offsite-backup-job-stale
+                  title: Forgejo Offsite Backup Job Stale
+                  condition: B
+                  for: 30m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: No Forgejo backup has been copied to the NAS in over 14 days
+                    description: >-
+                      Local backups are still being taken, but the forgejo-backup-offsite
+                      CronJob has not succeeded in more than 14 days — the NAS has been
+                      powered off too long and there is no off-node copy of the Forgejo
+                      dumps. Power on k3s-nas and let the 03:00 job run, or trigger it
+                      manually. See docs/forgejo-backups.md.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (time() - max(kube_cronjob_status_last_successful_time{cronjob="forgejo-backup-offsite",
+                          namespace="default"} > 0))
+                          or
+                          (time() - max(kube_cronjob_created{cronjob="forgejo-backup-offsite",
+                          namespace="default"}))
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 1209600
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: forgejo-backup-job-stale
+                  title: Forgejo Backup Job Stale
+                  condition: B
+                  for: 30m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: No successful Forgejo backup in over 2 days
+                    description: >-
+                      The forgejo-backup CronJob has not completed successfully in more
+                      than 2 days, so no recent Forgejo dump exists anywhere. This fires
+                      whether the nightly job failed, was never scheduled, or the CronJob
+                      is suspended. Unlike forgejo-backup-job-failed it stays firing until
+                      a run actually succeeds, so it does not clear when the failed Job
+                      objects are deleted. Run Stage 1 manually and confirm an archive
+                      appears. See docs/forgejo-backups.md.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (time() - max(kube_cronjob_status_last_successful_time{cronjob="forgejo-backup",
+                          namespace="default"} > 0))
+                          or
+                          (time() - max(kube_cronjob_created{cronjob="forgejo-backup",
+                          namespace="default"}))
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 172800
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: config-backup-job-failed
+                  title: Config Backup Job Failed
+                  condition: B
+                  for: 5m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: Sonarr/Radarr/Bazarr/Transmission config backup job has failed
+                    description: >-
+                      A failed job was detected for the config-backup CronJob while the storage
+                      node (k3s-nas) has been continuously Ready for at least 26 hours, so at
+                      least one scheduled daily run elapsed under healthy conditions. These four
+                      config PVCs are node-local local-path volumes with no other automated
+                      backup — check pod logs and docs/config-backups.md.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (kube_job_status_failed{namespace="default",
+                          job_name=~"config-backup-[0-9]+"}
+                          and on(job_name, namespace)
+                          topk(1, kube_job_status_start_time{namespace="default",
+                          job_name=~"config-backup-[0-9]+"})
+                          )
+                          and on()
+                          (min_over_time((max by (node) (kube_node_status_condition{node="k3s-nas",
+                          condition="Ready", status="true"}))[26h:1m]) == 1)
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 0
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: config-backup-players-job-failed
+                  title: Config Backup (Players) Job Failed
+                  condition: B
+                  for: 5m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: Plex/Jellyfin config backup job has failed
+                    description: >-
+                      The most recent config-backup-players job failed for a reason other than
+                      the NFS mount deadline. This CronJob runs on the always-on k3s node but
+                      writes to the hard-mounted media-pvc, and the NAS powers itself off at
+                      03:03 nightly with no scheduled wake — so on a night it was never woken,
+                      the 01:00 pod sits in ContainerCreating until activeDeadlineSeconds
+                      (3600s) expires and the Job fails with reason=DeadlineExceeded. That is
+                      expected, not actionable, and is excluded here. Anything else means the
+                      container ran and failed: check `kubectl logs -l app=config-backup`.
+                      plex-config and jellyfin-config are node-local local-path volumes on k3s
+                      with no other automated backup — see docs/config-backups.md.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (kube_job_status_failed{namespace="default",
+                          job_name=~"config-backup-players.*",
+                          reason!="DeadlineExceeded"} > 0)
+                          and on(job_name, namespace)
+                          topk(1, kube_job_status_start_time{namespace="default",
+                          job_name=~"config-backup-players.*"})
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 0
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: migration-runner-job-failed
+                  title: Migration Runner Job Failed
+                  condition: B
+                  for: 5m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: The secret-generation migration job has failed
+                    description: >-
+                      The migration-runner Job in the migrations Flux layer exited
+                      non-zero — at least one script in migrations/ failed, or the Job
+                      hit activeDeadlineSeconds (600s) because a migration hung. The
+                      Job has ttlSecondsAfterFinished 600 and Flux re-applies it every
+                      minute, so a broken migration silently retries roughly every 11
+                      minutes with no other symptom than a downstream app missing a
+                      Secret. Inspect `kubectl get configmap migration-state -n default
+                      -o yaml` for keys valued `failed:<timestamp>:<rc>`, then
+                      `kubectl logs -n default -l job-name=migration-runner`. Common
+                      cause: 0017/0019 need a Running forgejo pod. See
+                      docs/apps-overview.md#secret-migration-jobs.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          max(max_over_time(kube_job_status_failed{namespace="default",
+                          job_name="migration-runner"}[20m]))
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 0
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: config-backup-schedule-missed
+                  title: Config Backup Schedule Missed
+                  condition: B
+                  for: 5m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: Config backup has not run in over 2 days
+                    description: >-
+                      The config-backup CronJob has not produced a new job in more than 2 days
+                      (2x its daily interval). The CronJob may be suspended or the scheduler may have failed.
+                      Before the first scheduled run this is measured from the CronJob's creation
+                      timestamp, so a CronJob that never schedules at all still alerts.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (time() - max by (cronjob) (kube_cronjob_status_last_schedule_time{cronjob="config-backup",
+                          namespace="default"} > 0))
+                          or
+                          (time() - max by (cronjob) (kube_cronjob_created{cronjob="config-backup",
+                          namespace="default"}))
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 172800
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: config-backup-players-job-stale
+                  title: Config Backup (Players) Job Stale
+                  condition: B
+                  for: 30m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: Plex/Jellyfin config backup has not succeeded in over 14 days
+                    description: >-
+                      config-backup-players has recorded no successful run in more than 14 days.
+                      It writes to the hard-mounted media-pvc, so it can only succeed on a night
+                      the NAS is still awake at 01:00 — a few missed nights are normal and are
+                      deliberately not alerted on. Fourteen days of nothing means either the
+                      backup is broken in a way that looks like a mount timeout, or the NAS has
+                      not been up at 01:00 in two weeks. Either way plex-config and
+                      jellyfin-config are unprotected. Before the first success this is measured
+                      from the CronJob's creation timestamp, so a backup that has never once
+                      succeeded still alerts. Wake the NAS and run
+                      `kubectl create job --from=cronjob/config-backup-players
+                      config-backup-players-manual`. See docs/config-backups.md.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (time() - max(kube_cronjob_status_last_successful_time{cronjob="config-backup-players",
+                          namespace="default"} > 0))
+                          or
+                          (time() - max(kube_cronjob_created{cronjob="config-backup-players",
+                          namespace="default"}))
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 1209600
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: config-backup-job-stale
+                  title: Config Backup Job Stale
+                  condition: B
+                  for: 30m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: Sonarr/Radarr/Bazarr/Transmission config backup has not succeeded in over 14 days
+                    description: >-
+                      config-backup has recorded no successful run in more than 14 days. This
+                      rule exists because config-backup-job-failed's 26-hour k3s-nas-Ready guard
+                      can never be satisfied by a box that powers off nightly, so it alone
+                      cannot prove the backup is alive. It writes to the four node-local
+                      sonarr-local-config-pvc, radarr-local-config-pvc, bazarr-local-config-pvc
+                      and transmission-local-config-pvc volumes via the hard-mounted media-pvc,
+                      so it can only succeed on a night the NAS is still awake at 02:00 — a few
+                      missed nights are normal and are deliberately not alerted on. Fourteen
+                      days of nothing means either the backup is broken in a way that looks like
+                      a mount timeout, or the NAS has not been up at 02:00 in two weeks. Before
+                      the first success this is measured from the CronJob's creation timestamp,
+                      so a backup that has never once succeeded still alerts. Wake the NAS and
+                      run `kubectl create job --from=cronjob/config-backup
+                      config-backup-manual`. See docs/config-backups.md.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (time() - max(kube_cronjob_status_last_successful_time{cronjob="config-backup",
+                          namespace="default"} > 0))
+                          or
+                          (time() - max(kube_cronjob_created{cronjob="config-backup",
+                          namespace="default"}))
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 1209600
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: kube-state-metrics-down
+                  title: Kube State Metrics Down
+                  condition: B
+                  for: 15m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: kube-state-metrics has not been scraped for 15 minutes
+                    description: >-
+                      No kube-state-metrics target is up. Every CronJob, Job and PVC alert in
+                      this stack is derived from kube_* metrics, so while this fires those
+                      alerts are blind rather than healthy. Check the
+                      kube-prometheus-stack-kube-state-metrics pod on node k3s.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: absent(up{job="kube-state-metrics"} == 1)
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 0
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+            - orgId: 1
+              name: Cluster DNS
+              folder: Alerts
+              interval: 1m
+              rules:
+                - uid: coredns-servfail-rate
+                  title: CoreDNS SERVFAIL Rate High
+                  condition: B
+                  for: 10m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: CoreDNS is returning SERVFAIL for more than 5% of queries
+                    description: >-
+                      CoreDNS forwards to the resolv.conf it snapshotted at pod start, so a
+                      regenerated node resolv.conf leaves it pointed at a dead upstream. Check
+                      kubectl logs -n kube-system deploy/coredns, fix with kubectl rollout
+                      restart deployment coredns -n kube-system.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (sum(rate(coredns_dns_responses_total{job="coredns", rcode="SERVFAIL"}[5m])) or vector(0))
+                          / clamp_min(sum(rate(coredns_dns_responses_total{job="coredns"}[5m])) or vector(1), 0.01)
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 0.05
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+                - uid: coredns-forward-broken
+                  title: CoreDNS Upstream Unreachable
+                  condition: B
+                  for: 5m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: CoreDNS reports all forward upstreams failing health checks
+                    description: >-
+                      CoreDNS forwards to the resolv.conf it snapshotted at pod start, so a
+                      regenerated node resolv.conf leaves it pointed at a dead upstream. Check
+                      kubectl logs -n kube-system deploy/coredns, fix with kubectl rollout
+                      restart deployment coredns -n kube-system.
+                  data:
+                    - refId: A
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: sum(increase(coredns_forward_healthcheck_broken_total{job="coredns"}[10m])) or vector(0)
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      datasourceUid: __expr__
+                      model:
+                        type: classic_conditions
+                        refId: B
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        conditions:
+                          - evaluator:
+                              type: gt
+                              params:
+                                - 0
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - A
+                            reducer:
+                              type: last
+            - orgId: 1
+              name: Node Pressure
+              folder: Alerts
+              interval: 1m
+              rules:
+                - uid: node-disk-pressure
+                  title: Node Disk Pressure
+                  condition: C
+                  for: 5m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: >-
+                      Node {{ "{{" }} $labels.node {{ "}}" }} is under DiskPressure
+                    description: >-
+                      Kubelet on {{ "{{" }} $labels.node {{ "}}" }} has set the DiskPressure
+                      condition. Pods on this node are being evicted. Check
+                      /var/lib/rancher/k3s/agent/containerd size and free space on the root
+                      filesystem; prune images with crictl rmi --prune. See docs/nas-k3s.md
+                      "DiskPressure Recovery".
+                  data:
+                    - refId: A
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          kube_node_status_condition{condition="DiskPressure", status="true"} == 1
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params: []
+                              type: gt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - B
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: A
+                        reducer: last
+                        refId: B
+                        type: reduce
+                    - refId: C
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params:
+                                - 0
+                              type: gt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - C
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: B
+                        refId: C
+                        threshold:
+                          conditions:
+                            - evaluator:
+                                params:
+                                  - 0
+                                type: gt
+                        type: threshold
+                - uid: node-fs-almost-full
+                  title: Node Filesystem Almost Full (15%)
+                  condition: C
+                  for: 10m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: >-
+                      Node {{ "{{" }} $labels.instance {{ "}}" }} root filesystem below 15% free
+                    description: >-
+                      Root filesystem on {{ "{{" }} $labels.instance {{ "}}" }} is
+                      {{ "{{" }} printf "%.1f" $values.B.Value {{ "}}" }}% available.
+                      Expand the volume or prune container images
+                      (crictl rmi --prune) before DiskPressure triggers eviction.
+                  data:
+                    - refId: A
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (
+                            node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay|squashfs"}
+                            /
+                            node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay|squashfs"}
+                          )
+                          * 100
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params: []
+                              type: lt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - B
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: A
+                        reducer: last
+                        refId: B
+                        type: reduce
+                    - refId: C
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params:
+                                - 15
+                              type: lt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - C
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: B
+                        refId: C
+                        threshold:
+                          conditions:
+                            - evaluator:
+                                params:
+                                  - 15
+                                type: lt
+                        type: threshold
+                - uid: node-fs-critical
+                  title: Node Filesystem Critical (5%)
+                  condition: C
+                  for: 2m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: >-
+                      Node {{ "{{" }} $labels.instance {{ "}}" }} root filesystem below 5% free — DiskPressure imminent
+                    description: >-
+                      Root filesystem on {{ "{{" }} $labels.instance {{ "}}" }} is
+                      {{ "{{" }} printf "%.1f" $values.B.Value {{ "}}" }}% available.
+                      Kubelet will trigger DiskPressure eviction imminently. Run crictl rmi --prune
+                      (see docs/nas-k3s.md "DiskPressure Recovery").
+                  data:
+                    - refId: A
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          (
+                            node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay|squashfs"}
+                            /
+                            node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay|squashfs"}
+                          )
+                          * 100
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params: []
+                              type: lt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - B
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: A
+                        reducer: last
+                        refId: B
+                        type: reduce
+                    - refId: C
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params:
+                                - 5
+                              type: lt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - C
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: B
+                        refId: C
+                        threshold:
+                          conditions:
+                            - evaluator:
+                                params:
+                                  - 5
+                                type: lt
+                        type: threshold
+            - orgId: 1
+              name: Proxmox Hardware
+              folder: Alerts
+              interval: 1m
+              rules:
+                - uid: proxmox-cpu-temp-high
+                  title: Proxmox CPU Temperature High
+                  condition: C
+                  for: 5m
+                  noDataState: NoData
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: >-
+                      Proxmox CPU temperature is {{ "{{" }} printf "%.0f" $values.B.Value {{ "}}" }}°C
+                    description: >-
+                      Proxmox host CPU temperature has been above 80°C for 5 minutes.
+                      Check fan status and airflow in the machine.
+                  data:
+                    - refId: A
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          max(node_hwmon_temp_celsius{instance="proxmox"}
+                          and on(instance, chip)
+                          node_hwmon_chip_names{instance="proxmox", chip_name=~"k10temp|coretemp"})
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params: []
+                              type: gt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - B
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: A
+                        reducer: last
+                        refId: B
+                        type: reduce
+                    - refId: C
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params:
+                                - 80
+                              type: gt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - C
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: B
+                        refId: C
+                        threshold:
+                          conditions:
+                            - evaluator:
+                                params:
+                                  - 80
+                                type: gt
+                        type: threshold
+                - uid: proxmox-cpu-temp-critical
+                  title: Proxmox CPU Temperature Critical
+                  condition: C
+                  for: 2m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: >-
+                      Proxmox CPU temperature is {{ "{{" }} printf "%.0f" $values.B.Value {{ "}}" }}°C (CRITICAL)
+                    description: >-
+                      Proxmox host CPU temperature has been above 90°C for 2 minutes.
+                      The host is approaching thermal throttling or emergency shutdown.
+                      Check airflow, fans, and ambient temperature in the attic immediately.
+                  data:
+                    - refId: A
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          max(node_hwmon_temp_celsius{instance="proxmox"}
+                          and on(instance, chip)
+                          node_hwmon_chip_names{instance="proxmox", chip_name=~"k10temp|coretemp"})
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params: []
+                              type: gt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - B
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: A
+                        reducer: last
+                        refId: B
+                        type: reduce
+                    - refId: C
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params:
+                                - 90
+                              type: gt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - C
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: B
+                        refId: C
+                        threshold:
+                          conditions:
+                            - evaluator:
+                                params:
+                                  - 90
+                                type: gt
+                        type: threshold
+                - uid: proxmox-nvme-temp-high
+                  title: Proxmox NVMe Temperature High
+                  condition: C
+                  for: 5m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: >-
+                      Proxmox NVMe temperature is {{ "{{" }} printf "%.0f" $values.B.Value {{ "}}" }}°C
+                    description: >-
+                      Proxmox NVMe drive has been above 70°C for 5 minutes. Most consumer NVMe
+                      drives begin thermal throttling near 80°C. Check heatsink contact and airflow.
+                  data:
+                    - refId: A
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          max(node_hwmon_temp_celsius{instance="proxmox", chip="nvme_nvme0"})
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params: []
+                              type: gt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - B
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: A
+                        reducer: last
+                        refId: B
+                        type: reduce
+                    - refId: C
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params:
+                                - 70
+                              type: gt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - C
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: B
+                        refId: C
+                        threshold:
+                          conditions:
+                            - evaluator:
+                                params:
+                                  - 70
+                                type: gt
+                        type: threshold
+                - uid: proxmox-nvme-temp-critical
+                  title: Proxmox NVMe Temperature Critical
+                  condition: C
+                  for: 2m
+                  noDataState: OK
+                  execErrState: Error
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: >-
+                      Proxmox NVMe temperature is {{ "{{" }} printf "%.0f" $values.B.Value {{ "}}" }}°C (CRITICAL)
+                    description: >-
+                      Proxmox NVMe drive has been above 80°C for 2 minutes and is thermally
+                      throttling. Investigate airflow immediately — sustained heat shortens flash life.
+                  data:
+                    - refId: A
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: prometheus
+                      model:
+                        expr: >-
+                          max(node_hwmon_temp_celsius{instance="proxmox", chip="nvme_nvme0"})
+                        instant: true
+                        intervalMs: 1000
+                        maxDataPoints: 43200
+                        refId: A
+                    - refId: B
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params: []
+                              type: gt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - B
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: A
+                        reducer: last
+                        refId: B
+                        type: reduce
+                    - refId: C
+                      queryType: ""
+                      relativeTimeRange:
+                        from: 600
+                        to: 0
+                      datasourceUid: __expr__
+                      model:
+                        conditions:
+                          - evaluator:
+                              params:
+                                - 80
+                              type: gt
+                            operator:
+                              type: and
+                            query:
+                              params:
+                                - C
+                            reducer:
+                              type: last
+                            type: query
+                        datasource:
+                          type: __expr__
+                          uid: __expr__
+                        expression: B
+                        refId: C
+                        threshold:
+                          conditions:
+                            - evaluator:
+                                params:
+                                  - 80
+                                type: gt
+                        type: threshold
+      grafana.ini:
+        auth.proxy:
+          enabled: true
+          header_name: X-authentik-username
+          header_property: username
+          auto_sign_up: false
+          headers: "Name:X-authentik-name Email:X-authentik-email"
+          # Pod-network whitelist is gated by NetworkPolicy (grafana-networkpolicy.yaml) — only Traefik pods can reach :3000.
+          whitelist: "10.42.0.0/16"
+        auth:
+          disable_login_form: false
+      podDisruptionBudget:
+        minAvailable: 1
+      ingress:
+        enabled: true
+        ingressClassName: traefik-traefik
+        annotations:
+          traefik.ingress.kubernetes.io/router.entrypoints: websecure
+          traefik.ingress.kubernetes.io/router.middlewares: default-authentik-auth@kubernetescrd
+        hosts:
+          - grafana.home.bstjohn.net
+        tls:
+          - hosts:
+              - grafana.home.bstjohn.net
+            secretName: wildcard-home-tls
+
+    # --- Prometheus ---
+    prometheus:
+      podDisruptionBudget:
+        enabled: true
+        minAvailable: 1
+      prometheusSpec:
+        priorityClassName: critical-infrastructure
+        retention: 30d
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: local-path
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 20Gi
+        additionalScrapeConfigs:
+          - job_name: pve-exporter
+            metrics_path: /pve
+            params:
+              module: [default]
+              target: ["192.168.0.200"]
+            static_configs:
+              - targets: ["pve-exporter:9221"]
+            relabel_configs:
+              - source_labels: [__param_target]
+                target_label: instance
+          - job_name: cert-manager
+            static_configs:
+              - targets: ["cert-manager.cert-manager.svc.cluster.local:9402"]
+          - job_name: authentik
+            metrics_path: /metrics
+            static_configs:
+              - targets: ["authentik-server:9300"]
+          - job_name: authentik-worker
+            metrics_path: /metrics
+            static_configs:
+              - targets: ["authentik-worker:9300"]
+          - job_name: gatus
+            metrics_path: /metrics
+            static_configs:
+              - targets: ["gatus.default.svc.cluster.local:8080"]
+          - job_name: proxmox-node-exporter
+            static_configs:
+              - targets: ["192.168.0.200:9100"]
+                labels:
+                  instance: proxmox
+      ingress:
+        enabled: true
+        ingressClassName: traefik-traefik
+        annotations:
+          traefik.ingress.kubernetes.io/router.entrypoints: websecure
+          traefik.ingress.kubernetes.io/router.middlewares: default-authentik-auth@kubernetescrd
+        hosts:
+          - prometheus.home.bstjohn.net
+        tls:
+          - hosts:
+              - prometheus.home.bstjohn.net
+            secretName: wildcard-home-tls
+
+    # --- Default rule overrides ---
+    defaultRules:
+      disabled:
+        KubeNodeNotReady: true
+        KubeNodeUnreachable: true
+        KubeletDown: true
+
+    additionalPrometheusRulesMap:
+      custom-node-rules:
+        groups:
+          - name: kubernetes-system-node.custom
+            rules:
+              - alert: KubeNodeNotReady
+                expr: >-
+                  kube_node_status_condition{job="kube-state-metrics",
+                  condition="Ready",status="true",
+                  node!~"ryzen|k3s-nas"} == 0
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  description: >-
+                    {{ $labels.node }} has been unready for more than 15 minutes.
+                  runbook_url: >-
+                    https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubenodenotready
+                  summary: "Node {{ $labels.node }} is not ready."
+              - alert: KubeNodeUnreachable
+                expr: >-
+                  kube_node_spec_taint{job="kube-state-metrics",
+                  key="node.kubernetes.io/unreachable",effect="NoSchedule",
+                  node!~"ryzen|k3s-nas"} == 1
+                for: 0m
+                labels:
+                  severity: warning
+                annotations:
+                  description: >-
+                    {{ $labels.node }} is unreachable and some workloads may be rescheduled.
+                  runbook_url: >-
+                    https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubenodeunreachable
+                  summary: "Node {{ $labels.node }} is unreachable."
+              - alert: KubeletDown
+                expr: >-
+                  up{job="kubelet", metrics_path="/metrics",
+                  node!~"ryzen|k3s-nas"} == 0
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  description: >-
+                    Kubelet on {{ $labels.node }} is down.
+                  runbook_url: >-
+                    https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubeletdown
+                  summary: "Kubelet on {{ $labels.node }} is unreachable."
+
+    # --- Alertmanager (disabled — Gatus + Slack handles alerting) ---
+    alertmanager:
+      enabled: false
+
+    # --- Node Exporter ---
+    nodeExporter:
+      enabled: true
+    # Subchart override: kube-prometheus-stack exposes node-exporter as the
+    # `prometheus-node-exporter` subchart. Pin it to system-node-critical so
+    # kubelet evicts it last under resource pressure, preserving node metrics
+    # during a DiskPressure incident on k3s-nas.
+    prometheus-node-exporter:
+      priorityClassName: system-node-critical
+
+    # --- kube-state-metrics ---
+    kubeStateMetrics:
+      enabled: true
+
+    # --- k3s-specific: disable components that k3s bundles internally ---
+    kubeEtcd:
+      enabled: false
+    kubeControllerManager:
+      enabled: false
+    kubeScheduler:
+      enabled: false
+    kubeProxy:
+      enabled: false

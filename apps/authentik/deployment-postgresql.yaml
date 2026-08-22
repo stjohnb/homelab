@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authentik-postgresql
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: authentik-postgresql
+  template:
+    metadata:
+      labels:
+        app: authentik-postgresql
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: critical-infrastructure
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: postgresql
+          image: postgres:16.13-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: authentik
+            - name: POSTGRES_DB
+              value: authentik
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: PG_PASS
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 256Mi
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - mountPath: /var/lib/postgresql/data
+              name: postgresql-data
+              subPath: pgdata
+      volumes:
+        - name: postgresql-data
+          persistentVolumeClaim:
+            claimName: authentik-postgresql-data

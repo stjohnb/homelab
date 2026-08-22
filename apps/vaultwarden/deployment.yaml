@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vaultwarden
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vaultwarden
+  template:
+    metadata:
+      labels:
+        app: vaultwarden
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: standard
+      enableServiceLinks: false
+      containers:
+        - name: vaultwarden
+          image: docker.io/vaultwarden/server:1.36.0
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ROCKET_PORT
+              value: "8080"
+            - name: DOMAIN
+              value: https://vaultwarden.home.bstjohn.net
+            - name: SIGNUPS_ALLOWED
+              value: "false"
+            - name: INVITATIONS_ALLOWED
+              value: "true"
+            - name: SHOW_PASSWORD_HINT
+              value: "false"
+            - name: WEBSOCKET_ENABLED
+              value: "true"
+            - name: LOG_LEVEL
+              value: warn
+            - name: TZ
+              value: Europe/London
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: vaultwarden-admin
+                  key: admin_token
+          resources:
+            requests:
+              cpu: 25m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /alive
+              port: 8080
+            periodSeconds: 15
+          startupProbe:
+            httpGet:
+              path: /alive
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /alive
+              port: 8080
+            periodSeconds: 10
+          volumeMounts:
+            - mountPath: /data
+              name: vaultwarden-data
+      volumes:
+        - name: vaultwarden-data
+          persistentVolumeClaim:
+            claimName: vaultwarden-data

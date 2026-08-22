@@ -1,0 +1,284 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-github-alerts-script
+  namespace: default
+data:
+  server.py: |
+    #!/usr/bin/env python3
+    """Grafana webhook receiver that creates/deduplicates GitHub issues."""
+    import hmac
+    import http.server
+    import json
+    import os
+    import re
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
+    WEBHOOK_TOKEN = os.environ["WEBHOOK_TOKEN"]
+    GITHUB_REPO = os.environ.get("GITHUB_REPO", "St-John-Software/fleet-infra")
+    GITHUB_API = "https://api.github.com"
+
+    MAX_BODY = 1 * 1024 * 1024  # 1 MB
+
+
+    def github_api(method, path, body=None):
+        """Make a GitHub API request. Returns parsed JSON or None on error."""
+        url = f"{GITHUB_API}{path}" if path.startswith("/") else path
+        data = json.dumps(body).encode() if body else None
+        req = urllib.request.Request(
+            url, data=data, method=method,
+            headers={
+                "Authorization": f"token {GITHUB_TOKEN}",
+                "Accept": "application/vnd.github.v3+json",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            print(f"GitHub API error: {e.code} {e.reason} for {method} {url}")
+            try:
+                print(f"  Response: {e.read().decode()}")
+            except Exception:
+                pass
+            return None
+
+
+    def find_open_issue(alertname):
+        """Search for an existing open issue matching this alert."""
+        query = urllib.parse.quote(
+            f'repo:{GITHUB_REPO} is:issue is:open label:grafana-alert'
+            f' "[Alert] {alertname}" in:title'
+        )
+        result = github_api("GET", f"/search/issues?q={query}&per_page=1")
+        if result is None:
+            return None
+        items = result.get("items", [])
+        return items[0] if items else None
+
+
+    def build_new_body(alertname, severity, starts_at, summary, description):
+        """Build the issue body for a new alert issue."""
+        lines = [
+            f"## Grafana Alert: {alertname}",
+            "",
+            f"**Severity:** {severity}",
+            "**Status:** firing",
+            "",
+            "| Metric | Value |",
+            "|--------|-------|",
+            f"| First Occurrence | {starts_at} |",
+            f"| Last Occurrence | {starts_at} |",
+            "| Occurrences | 1 |",
+            "",
+            "### Summary",
+            summary,
+            "",
+            "### Description",
+            description,
+            "",
+            "---",
+            "*Automatically managed by Grafana alerting."
+            " This issue will be closed when the alert resolves.*",
+        ]
+        return "\n".join(lines)
+
+
+    def update_issue_body(existing_body, starts_at, summary):
+        """Update occurrence tracking in an existing issue body."""
+        body = re.sub(
+            r"\| Last Occurrence \| .+ \|",
+            f"| Last Occurrence | {starts_at} |",
+            existing_body,
+        )
+        match = re.search(r"\| Occurrences \| (\d+) \|", body)
+        if match:
+            count = int(match.group(1)) + 1
+            body = re.sub(
+                r"\| Occurrences \| \d+ \|",
+                f"| Occurrences | {count} |",
+                body,
+            )
+        else:
+            print("WARNING: Could not find Occurrences row in issue body")
+        body = re.sub(
+            r"(### Summary\n).+?\n(\n### Description)",
+            lambda m: m.group(1) + summary + "\n" + m.group(2),
+            body,
+            flags=re.DOTALL,
+        )
+        return body
+
+
+    def mark_resolved_body(existing_body, resolved_at):
+        """Mark an issue body as resolved."""
+        body = re.sub(
+            r"\*\*Status:\*\* firing",
+            "**Status:** resolved",
+            existing_body,
+        )
+        if "| Resolved |" not in body:
+            body = re.sub(
+                r"(\| Occurrences \| \d+ \|)",
+                f"\\1\n| Resolved | {resolved_at} |",
+                body,
+            )
+        else:
+            body = re.sub(
+                r"\| Resolved \| .+ \|",
+                f"| Resolved | {resolved_at} |",
+                body,
+            )
+        return body
+
+
+    def ensure_label_exists():
+        """Create the grafana-alert label if it doesn't exist."""
+        result = github_api(
+            "POST",
+            f"/repos/{GITHUB_REPO}/labels",
+            {
+                "name": "grafana-alert",
+                "color": "d73a4a",
+                "description": "Auto-created by Grafana alerting",
+            },
+        )
+        if result:
+            print("Created 'grafana-alert' label")
+        else:
+            print("Label 'grafana-alert' already exists or creation failed (non-fatal)")
+
+
+    def handle_alert(alert):
+        """Process a single alert from the Grafana webhook payload."""
+        alertname = alert.get("labels", {}).get("alertname", "Unknown")
+        status = alert.get("status", "firing")
+        severity = alert.get("labels", {}).get("severity", "unknown")
+        starts_at = alert.get("startsAt", "unknown")
+        ends_at = alert.get("endsAt", "unknown")
+        annotations = alert.get("annotations", {})
+        summary = annotations.get("summary", "No summary provided")
+        description = annotations.get("description", "No description provided")
+        title = f"[Alert] {alertname}"
+
+        existing = find_open_issue(alertname)
+
+        if status == "firing":
+            if existing:
+                issue_number = existing["number"]
+                updated_body = update_issue_body(existing["body"], starts_at, summary)
+                result = github_api(
+                    "PATCH",
+                    f"/repos/{GITHUB_REPO}/issues/{issue_number}",
+                    {"body": updated_body},
+                )
+                if result:
+                    print(f"Updated issue #{issue_number} for alert '{alertname}'")
+                else:
+                    print(f"Failed to update issue #{issue_number}")
+            else:
+                body = build_new_body(
+                    alertname, severity, starts_at, summary, description
+                )
+                result = github_api(
+                    "POST",
+                    f"/repos/{GITHUB_REPO}/issues",
+                    {"title": title, "body": body, "labels": ["grafana-alert"]},
+                )
+                if result:
+                    print(
+                        f"Created issue #{result.get('number')}"
+                        f" for alert '{alertname}'"
+                    )
+                else:
+                    print(f"Failed to create issue for alert '{alertname}'")
+        elif status == "resolved":
+            if existing:
+                issue_number = existing["number"]
+                resolved_body = mark_resolved_body(existing["body"], ends_at)
+                github_api(
+                    "PATCH",
+                    f"/repos/{GITHUB_REPO}/issues/{issue_number}",
+                    {"body": resolved_body, "state": "closed"},
+                )
+                print(
+                    f"Resolved and closed issue #{issue_number}"
+                    f" for alert '{alertname}'"
+                )
+            else:
+                print(
+                    f"No open issue found for resolved alert '{alertname}' — ignoring"
+                )
+
+
+    def is_authorized(headers):
+        auth = headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            return False
+        provided = auth[len("Bearer "):]
+        return hmac.compare_digest(provided, WEBHOOK_TOKEN)
+
+
+    class WebhookHandler(http.server.BaseHTTPRequestHandler):
+        """HTTP handler for Grafana webhook requests."""
+
+        def do_GET(self):
+            if self.path == "/healthz":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"ok")
+            else:
+                self.send_response(404)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"not found")
+
+        def do_POST(self):
+            if not is_authorized(self.headers):
+                self.send_response(401)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"unauthorized")
+                return
+            if self.path != "/webhook":
+                self.send_response(404)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"not found")
+                return
+            try:
+                try:
+                    length = int(self.headers.get("Content-Length", 0) or 0)
+                except ValueError:
+                    length = 0
+                length = min(length, MAX_BODY)
+                raw = self.rfile.read(length)
+                payload = json.loads(raw)
+                alerts = payload.get("alerts", [])
+                print(f"Received webhook with {len(alerts)} alert(s)")
+                for alert in alerts:
+                    try:
+                        handle_alert(alert)
+                    except Exception as e:
+                        print(f"Error handling alert: {e}")
+            except Exception as e:
+                print(f"Error processing webhook: {e}")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, format, *args):
+            print(f"[HTTP] {format % args}")
+
+
+    if __name__ == "__main__":
+        ensure_label_exists()
+        server = http.server.HTTPServer(("0.0.0.0", 8080), WebhookHandler)
+        print("Grafana GitHub Alerts webhook server listening on :8080")
+        server.serve_forever()

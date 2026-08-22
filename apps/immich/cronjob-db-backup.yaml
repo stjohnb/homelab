@@ -1,0 +1,175 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: immich-db-backup
+  labels:
+    app: immich
+spec:
+  schedule: "0 */6 * * *"
+  timeZone: Europe/London
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1800
+      backoffLimit: 1
+      # An empty database is a standing condition, not a transient fault — retrying
+      # burns a second pod on an identical failure. The pg-dump container exits 3 for
+      # that case only; FailJob ends the Job on the first such pod and stamps its
+      # Failed condition with reason="PodFailurePolicy". The critical alert excludes
+      # that reason; "Immich Database Is Empty" selects it.
+      # Requires restartPolicy: Never, already set below.
+      podFailurePolicy:
+        rules:
+          - action: FailJob
+            onExitCodes:
+              containerName: pg-dump
+              operator: In
+              values:
+                - 3
+      template:
+        metadata:
+          labels:
+            component: db-backup
+            claws.st-john-software.com/nfs-dependent: "true"
+        spec:
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          # Pinned to the storage node (k3s-nas). The NAS is powered off most
+          # of the time and this job is pointless without its media, so it
+          # must fail cleanly here rather than run without storage. See docs/nas-k3s.md.
+          nodeSelector:
+            node-role.kubernetes.io/storage: "true"
+          tolerations:
+            - key: node-role.kubernetes.io/storage
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          securityContext:
+            fsGroup: 70
+          initContainers:
+            - name: init-backup-dir
+              image: busybox:1.36
+              command: ["sh", "-c", "mkdir -p /media/backups/immich && chown 70:70 /media/backups/immich"]
+              securityContext:
+                runAsUser: 0
+              volumeMounts:
+                - name: media
+                  mountPath: /media
+          containers:
+            - name: pg-dump
+              image: postgres:16-alpine
+              securityContext:
+                runAsUser: 70
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: immich-db-secret
+                      key: password
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+
+                  BACKUP_DIR="/media/backups/immich"
+                  # Just above the largest observed geodata-only dump (16676452 bytes,
+                  # measured across two months of empty-DB backups — see issue #698).
+                  # A dump at or below this floor carries reference tables only.
+                  MIN_DUMP_BYTES=17000000
+                  PSQL="psql -v ON_ERROR_STOP=1 --host=immich-postgres --username=immich --dbname=immich -tAc"
+
+                  # Wait up to 10 minutes for postgres. Immich is pinned to the same storage
+                  # node, so if this pod mounted NFS the DB should come up too. Unlike the
+                  # previous behaviour, an unreachable DB now FAILS rather than exiting 0 —
+                  # an extended outage must be visible, not a silent skip.
+                  echo "Checking postgres availability..."
+                  ATTEMPT=1
+                  until pg_isready --host=immich-postgres --username=immich --timeout=5 --quiet; do
+                    if [ "${ATTEMPT}" -ge 10 ]; then
+                      echo "FAIL: postgres unreachable after 10 attempts (~10m)"
+                      exit 1
+                    fi
+                    echo "Postgres not ready (attempt ${ATTEMPT}/10), waiting 60s..."
+                    ATTEMPT=$((ATTEMPT + 1))
+                    sleep 60
+                  done
+
+                  # Content assertion. pg_dump exits 0 on an empty database, so exit status
+                  # alone is not evidence of a usable backup (issue #698: three months of
+                  # geodata-only dumps reported success).
+                  echo "Asserting database has user data..."
+                  ASSETS="$(${PSQL} 'select count(*) from asset')"
+                  USERS="$(${PSQL} 'select count(*) from "user"')"
+                  echo "Row counts: asset=${ASSETS} user=${USERS}"
+                  if [ "${ASSETS}" -eq 0 ] || [ "${USERS}" -eq 0 ]; then
+                    echo "FAIL: refusing to back up an empty database (asset=${ASSETS} user=${USERS})."
+                    echo "immich-postgres-pvc is node-local (local-path); this usually means it was lost."
+                    echo "Existing backups have NOT been rotated."
+                    exit 3
+                  fi
+
+                  TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+                  BACKUP_FILE="${BACKUP_DIR}/immich-db-${TIMESTAMP}.pgdump"
+                  mkdir -p "${BACKUP_DIR}"
+
+                  echo "Starting pg_dump to ${BACKUP_FILE}..."
+                  pg_dump \
+                    --host=immich-postgres \
+                    --username=immich \
+                    --dbname=immich \
+                    --format=custom \
+                    --file="${BACKUP_FILE}"
+
+                  # Post-dump verification. Every failure removes the bad file and exits
+                  # non-zero BEFORE the retention rm, so a bad dump can neither be kept nor
+                  # evict the last good one.
+                  BYTES="$(wc -c < "${BACKUP_FILE}")"
+                  echo "Dump size: ${BYTES} bytes"
+
+                  if ! pg_restore --list "${BACKUP_FILE}" > /tmp/toc.txt; then
+                    echo "FAIL: pg_restore --list could not read ${BACKUP_FILE} (corrupt dump)."
+                    rm -f "${BACKUP_FILE}"
+                    exit 1
+                  fi
+                  for TBL in asset user; do
+                    if ! grep -q "TABLE DATA public ${TBL} " /tmp/toc.txt; then
+                      echo "FAIL: dump TOC has no TABLE DATA entry for public.${TBL}"
+                      rm -f "${BACKUP_FILE}"
+                      exit 1
+                    fi
+                  done
+
+                  if [ "${BYTES}" -le "${MIN_DUMP_BYTES}" ]; then
+                    echo "FAIL: dump is ${BYTES} bytes, at or below the ${MIN_DUMP_BYTES} byte floor."
+                    echo "That is the geodata-only baseline — the dump carries no library data."
+                    rm -f "${BACKUP_FILE}"
+                    exit 1
+                  fi
+
+                  echo "Backup verified: ${BACKUP_FILE} ($(du -h "${BACKUP_FILE}" | cut -f1), asset=${ASSETS} user=${USERS})"
+
+                  # Retain the 14 most recent backups. Only reached on a verified dump.
+                  cd "${BACKUP_DIR}"
+                  ls -t *.pgdump | tail -n +15 | xargs -r rm -v
+
+                  echo "Current backups:"
+                  ls -lht *.pgdump
+              volumeMounts:
+                - name: media
+                  mountPath: /media
+              resources:
+                requests:
+                  memory: 128Mi
+                limits:
+                  memory: 512Mi
+          volumes:
+            - name: media
+              persistentVolumeClaim:
+                claimName: media-pvc

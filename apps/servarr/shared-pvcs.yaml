@@ -1,0 +1,108 @@
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: media-nfs-pv
+spec:
+  capacity:
+    storage: 10Ti
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 192.168.0.128
+    path: /mnt/SSD-POOL/media
+  mountOptions:
+    - nfsvers=3
+    - hard
+    - intr
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: media-pvc
+  labels:
+    app: servarr
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Ti
+  volumeName: media-nfs-pv
+  storageClassName: ""
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: media-soft-nfs-pv
+spec:
+  capacity:
+    storage: 10Ti
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 192.168.0.128
+    path: /mnt/SSD-POOL/media
+  # Readers only (Plex, Jellyfin). A running pod gets EIO when the NAS sleeps
+  # mid-session instead of blocking in D-state forever. Writers keep the hard
+  # mount on media-nfs-pv — soft writes can be silently lost.
+  mountOptions:
+    - nfsvers=3
+    - soft
+    - timeo=50
+    - retrans=2
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: media-soft-pvc
+  labels:
+    app: media
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Ti
+  volumeName: media-soft-nfs-pv
+  storageClassName: ""
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: transmission-downloads-nfs-pv
+spec:
+  capacity:
+    storage: 1Ti
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 192.168.0.128
+    path: /mnt/SSD-POOL/downloads
+  mountOptions:
+    - nfsvers=3
+    - hard
+    - intr
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: transmission-downloads-pvc
+  labels:
+    app: transmission
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Ti
+  volumeName: transmission-downloads-nfs-pv
+  storageClassName: ""

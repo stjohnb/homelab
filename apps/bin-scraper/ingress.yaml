@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bin-scraper
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik-traefik
+  tls:
+  - hosts:
+    - bin-scraper.home.bstjohn.net
+    secretName: wildcard-home-tls
+  rules:
+  - host: bin-scraper.home.bstjohn.net
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: bin-scraper
+            port:
+              number: 3000

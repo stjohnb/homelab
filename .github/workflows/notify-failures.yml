@@ -1,0 +1,89 @@
+name: Notify on main build failure
+
+# Triggers removed for the public snapshot — this workflow is intentionally disabled.
+# See the private source repository for the active version.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+# `gh` comes from this repo's flake.nix `scripts` devShell — the self-hosted
+# NixOS runners provide only nix/git/docker, so every run step here executes
+# inside the flake via the job-level default shell. That needs the repo
+# checked out first, which is why both jobs start with a checkout they didn't
+# previously need.
+jobs:
+  notify:
+    runs-on: [self-hosted, linux]
+    if: github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_branch == 'main'
+    defaults:
+      run:
+        shell: nix --extra-experimental-features nix-command --extra-experimental-features flakes develop ${{ github.workspace }}#scripts --command bash -euo pipefail {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Check for existing open issue
+        id: check-issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+        run: |
+          existing=$(gh issue list \
+            --repo ${{ github.repository }} \
+            --state open \
+            --label bug \
+            --search "\"Build failure: ${WORKFLOW_NAME}\" in:title" \
+            --json title \
+            --jq "length")
+          echo "count=${existing}" >> "$GITHUB_OUTPUT"
+
+      - name: Create failure issue
+        if: steps.check-issue.outputs.count == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          gh label create bug --color d73a4a --description "Something isn't working" --force 2>/dev/null || true
+          gh issue create \
+            --repo ${{ github.repository }} \
+            --title "Build failure: ${WORKFLOW_NAME}" \
+            --body "Workflow **${WORKFLOW_NAME}** failed on \`main\`: ${RUN_URL}" \
+            --label bug
+
+  close-on-success:
+    runs-on: [self-hosted, linux]
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'
+    defaults:
+      run:
+        shell: nix --extra-experimental-features nix-command --extra-experimental-features flakes develop ${{ github.workspace }}#scripts --command bash -euo pipefail {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Close existing failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+        run: |
+          issue_number=$(gh issue list \
+            --repo ${{ github.repository }} \
+            --state open \
+            --label bug \
+            --search "\"Build failure: ${WORKFLOW_NAME}\" in:title" \
+            --json number \
+            --jq ".[0].number // empty")
+          if [ -n "$issue_number" ]; then
+            gh issue close "$issue_number" \
+              --repo ${{ github.repository }} \
+              --comment "Build has recovered. Closing automatically."
+          fi

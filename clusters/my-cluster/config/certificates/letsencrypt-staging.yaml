@@ -1,0 +1,25 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: brendan@bstjohn.net
+    privateKeySecretRef:
+      name: letsencrypt-staging-key
+    solvers:
+      - dns01:
+          webhook:
+            groupName: acme.bstjohn.net
+            solverName: godaddy
+            config:
+              apiKeySecretRef:
+                name: godaddy-api-key
+                key: key
+                secret: secret
+              production: false
+              ttl: 600
+        selector:
+          dnsZones:
+            - "bstjohn.net"

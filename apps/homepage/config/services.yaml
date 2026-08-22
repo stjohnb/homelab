@@ -1,0 +1,159 @@
+- Apps:
+    - Chat:
+        icon: mdi-robot
+        href: https://chat.home.bstjohn.net
+        siteMonitor: https://chat.home.bstjohn.net
+        description: AI Chat
+    - Immich:
+        icon: immich.png
+        href: https://immich.home.bstjohn.net
+        siteMonitor: https://immich.home.bstjohn.net
+        description: Photo Management
+    - Mealie:
+        icon: mealie.png
+        href: https://mealie.home.bstjohn.net
+        siteMonitor: https://mealie.home.bstjohn.net
+        description: Recipe Manager
+    - Vaultwarden:
+        icon: bitwarden.png
+        href: https://vaultwarden.home.bstjohn.net
+        siteMonitor: https://vaultwarden.home.bstjohn.net/alive
+        description: Password Manager
+    - Plex:
+        icon: plex.png
+        href: https://plex.home.bstjohn.net
+        siteMonitor: https://plex.home.bstjohn.net
+        description: Media Server
+    - Jellyfin:
+        icon: jellyfin.png
+        href: https://jellyfin.home.bstjohn.net
+        siteMonitor: https://jellyfin.home.bstjohn.net
+        description: Media Server (SSO)
+    # Always reachable, even while the NAS is asleep — Plex and Jellyfin now
+    # stay up on k3s, so they no longer surface the gate's wake page for you.
+    - Wake NAS:
+        icon: mdi-power-sleep
+        href: https://wake.home.bstjohn.net
+        siteMonitor: https://wake.home.bstjohn.net
+        description: Wake the NAS
+    - Home Assistant:
+        icon: home-assistant.png
+        href: https://home-assistant.home.bstjohn.net
+        siteMonitor: https://home-assistant.home.bstjohn.net
+        description: Smart Home
+    # Overseerr is intentionally listed here in Apps for easy access by
+    # non-technical users, and also in the Servarr section where it
+    # logically belongs. Do not remove this duplicate.
+    - Overseerr:
+        icon: overseerr.png
+        href: https://overseerr.home.bstjohn.net
+        siteMonitor: https://overseerr.home.bstjohn.net
+        description: Request Media
+
+- Home Automation:
+    - Awtrix:
+        icon: mdi-monitor
+        href: https://awtrix.home.bstjohn.net/screen
+        siteMonitor: https://awtrix.home.bstjohn.net/screen
+        description: LED Matrix
+    - Bin Scraper:
+        icon: mdi-trash-can-outline
+        href: https://bin-scraper.home.bstjohn.net
+        siteMonitor: https://bin-scraper.home.bstjohn.net/version
+        description: Bin Collection
+
+- Servarr:
+    # Overseerr is also listed in the Apps section above for easy discovery
+    # by non-technical users. This is intentional — do not remove either entry.
+    - Overseerr:
+        icon: overseerr.png
+        href: https://overseerr.home.bstjohn.net
+        siteMonitor: https://overseerr.home.bstjohn.net
+        description: Request Management
+    - Jellyseerr:
+        icon: jellyseerr.png
+        href: https://jellyseerr.home.bstjohn.net
+        siteMonitor: https://jellyseerr.home.bstjohn.net
+        description: Request Management (SSO)
+    - Seerr:
+        icon: jellyseerr.png
+        href: https://seerr.home.bstjohn.net
+        siteMonitor: https://seerr.home.bstjohn.net
+        description: Request Management (SSO, preview)
+    - Sonarr:
+        icon: sonarr.png
+        href: https://sonarr.home.bstjohn.net
+        siteMonitor: https://sonarr.home.bstjohn.net
+        description: TV Shows
+    - Radarr:
+        icon: radarr.png
+        href: https://radarr.home.bstjohn.net
+        siteMonitor: https://radarr.home.bstjohn.net
+        description: Movies
+    - Prowlarr:
+        icon: prowlarr.png
+        href: https://prowlarr.home.bstjohn.net
+        siteMonitor: https://prowlarr.home.bstjohn.net
+        description: Indexer Manager
+    - Bazarr:
+        icon: bazarr.png
+        href: https://bazarr.home.bstjohn.net
+        siteMonitor: https://bazarr.home.bstjohn.net
+        description: Subtitle Manager
+    - Transmission:
+        icon: transmission.png
+        href: https://transmission.home.bstjohn.net
+        siteMonitor: https://transmission.home.bstjohn.net
+        description: Torrent Client
+
+- Infrastructure:
+    - Proxmox:
+        icon: si-proxmox
+        href: https://proxmox.home.bstjohn.net
+        siteMonitor: https://proxmox.home.bstjohn.net
+        description: Virtualization
+    - UniFi:
+        icon: unifi.png
+        href: https://unifi.home.bstjohn.net
+        siteMonitor: https://unifi.home.bstjohn.net
+        description: Network
+    - Grafana:
+        icon: grafana.png
+        href: https://grafana.home.bstjohn.net
+        siteMonitor: https://grafana.home.bstjohn.net
+        description: Dashboards
+    - Prometheus:
+        icon: prometheus.png
+        href: https://prometheus.home.bstjohn.net
+        siteMonitor: https://prometheus.home.bstjohn.net
+        description: Metrics
+    - Gatus:
+        icon: mdi-heart-pulse
+        href: https://gatus.home.bstjohn.net
+        siteMonitor: https://gatus.home.bstjohn.net
+        description: Uptime
+    - Authentik:
+        icon: authentik.png
+        href: https://auth.home.bstjohn.net
+        siteMonitor: https://auth.home.bstjohn.net
+        description: SSO
+    - Headlamp:
+        icon: mdi-kubernetes
+        href: https://dashboard.home.bstjohn.net
+        siteMonitor: https://dashboard.home.bstjohn.net
+        description: Kubernetes Dashboard
+    - Claws:
+        icon: mdi-cat
+        href: https://claws.home.bstjohn.net
+        siteMonitor: https://claws.home.bstjohn.net/status
+        description: Claws
+    - Datasette:
+        icon: mdi-database-search
+        href: https://datasette.home.bstjohn.net
+        siteMonitor: https://datasette.home.bstjohn.net
+        description: Data Explorer
+    - Forgejo:
+        icon: forgejo.png
+        href: https://git.home.bstjohn.net
+        siteMonitor: https://git.home.bstjohn.net
+        description: Git Forge

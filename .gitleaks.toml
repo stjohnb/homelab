@@ -1,0 +1,10 @@
+[extend]
+# Use the default gitleaks ruleset (150+ patterns for cloud credentials,
+# API keys, private keys, OAuth tokens, etc.)
+useDefault = true
+
+# Paths that never contain real secrets — skip entirely to avoid noise.
+[allowlist]
+paths = [
+  '''clusters/my-cluster/flux-system/gotk-components\.yaml''',
+]

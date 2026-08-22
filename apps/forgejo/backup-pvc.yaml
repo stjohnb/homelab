@@ -1,0 +1,57 @@
+---
+# Nightly dumps land here first. Separate from forgejo-data on purpose: the
+# restore procedure wipes forgejo-data, so backups must not live inside it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: forgejo-backups
+  labels:
+    app: forgejo
+spec:
+  storageClassName: local-path
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+# Same export as media-nfs-pv (apps/servarr/shared-pvcs.yaml), distinct on
+# purpose: this volume is mounted from node k3s (24/7 control plane), not from
+# the storage node, so it uses soft/retry=0 — a hung `hard` NFS mount on the
+# control-plane node is a far worse failure than a skipped offsite copy.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: forgejo-backup-nfs-pv
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 192.168.0.128
+    path: /mnt/SSD-POOL/media
+  mountOptions:
+    - nfsvers=3
+    - soft
+    - timeo=50
+    - retrans=2
+    - retry=0
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: forgejo-backup-pvc
+  labels:
+    app: forgejo
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  volumeName: forgejo-backup-nfs-pv
+  storageClassName: ""

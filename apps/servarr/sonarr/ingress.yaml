@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sonarr
+  labels:
+    app: sonarr
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default-authentik-auth@kubernetescrd
+spec:
+  ingressClassName: traefik-traefik
+  tls:
+    - hosts:
+        - sonarr.home.bstjohn.net
+      secretName: wildcard-home-tls
+  rules:
+    - host: sonarr.home.bstjohn.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sonarr
+                port:
+                  number: 8989

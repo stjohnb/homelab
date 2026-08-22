@@ -1,0 +1,185 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sonarr
+  labels:
+    app: sonarr
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sonarr
+  template:
+    metadata:
+      labels:
+        app: sonarr
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: low-priority
+      enableServiceLinks: false
+      # Pinned to the storage node (k3s-nas). The NAS is powered off most of
+      # the time and this service is pointless without its media, so it must
+      # fail cleanly here rather than run without storage. See docs/nas-k3s.md.
+      nodeSelector:
+        node-role.kubernetes.io/storage: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/storage
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      initContainers:
+        - name: set-external-auth
+          image: busybox:1.37
+          command: ["sh", "-c"]
+          env:
+            - name: APIKEY
+              valueFrom:
+                secretKeyRef:
+                  name: servarr-apikeys
+                  key: sonarr-api-key
+          args:
+            - |
+              set -e
+              CONFIG=/config/config.xml
+              # NOTE: On fresh install, config does not exist yet. The patch
+              # is a no-op on first boot; auth is disabled on the next restart.
+              # An empty file means an ungraceful shutdown truncated the config;
+              # remove it so the app regenerates a valid one on startup.
+              if [ -f "$CONFIG" ] && [ ! -s "$CONFIG" ]; then
+                rm -f "$CONFIG"
+              fi
+              if [ -s "$CONFIG" ]; then
+                if grep -q '<AuthenticationMethod>' "$CONFIG"; then
+                  sed -i 's|<AuthenticationMethod>.*</AuthenticationMethod>|<AuthenticationMethod>External</AuthenticationMethod>|' "$CONFIG"
+                else
+                  sed -i 's|</Config>|  <AuthenticationMethod>External</AuthenticationMethod>\n</Config>|' "$CONFIG"
+                fi
+                if grep -q '<AuthenticationRequired>' "$CONFIG"; then
+                  sed -i 's|<AuthenticationRequired>.*</AuthenticationRequired>|<AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>|' "$CONFIG"
+                else
+                  sed -i 's|</Config>|  <AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>\n</Config>|' "$CONFIG"
+                fi
+                if grep -q '<ApiKey>' "$CONFIG"; then
+                  sed -i "s|<ApiKey>.*</ApiKey>|<ApiKey>${APIKEY}</ApiKey>|" "$CONFIG"
+                else
+                  sed -i "s|</Config>|  <ApiKey>${APIKEY}</ApiKey>\n</Config>|" "$CONFIG"
+                fi
+              fi
+          volumeMounts:
+            - name: sonarr-config
+              mountPath: /config
+      containers:
+        - name: sonarr
+          image: linuxserver/sonarr:4.0.17
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: "Europe/London"
+          ports:
+            - name: http
+              containerPort: 8989
+              protocol: TCP
+          volumeMounts:
+            - name: sonarr-config
+              mountPath: /config
+            - name: media
+              mountPath: /tv
+              subPath: TV
+            - name: downloads
+              mountPath: /downloads
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 1Gi
+              cpu: 2000m
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 8989
+            periodSeconds: 60
+            timeoutSeconds: 15
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: 8989
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 8989
+            periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 3
+        # Self-heal sidecar: Sonarr's root folder and download client live in
+        # its database, which is NOT GitOps-managed. An ungraceful shutdown can
+        # reset the DB, losing both with nothing to restore them (Prowlarr
+        # re-syncs indexers, but not these). Without a root folder every
+        # Overseerr push fails; without the download client nothing downloads.
+        # This sidecar reconciles both from the API. Both POSTs are idempotent
+        # (skipped when already present), so it is a no-op in steady state.
+        # It also reconciles removeCompletedDownloads/removeFailedDownloads on an existing client — see issue #728.
+        # The reconcile loop itself is shared with Radarr — see apps/servarr/reconcile-config.sh.
+        - name: config-reconciler
+          image: curlimages/curl:8.21.0
+          command: ["/bin/sh", "/scripts/reconcile.sh"]
+          env:
+            - name: API_PORT
+              value: "8989"
+            - name: ROOT_FOLDER
+              value: /tv
+            - name: CATEGORY_FIELD
+              value: tvCategory
+            - name: CATEGORY_VALUE
+              value: tv-sonarr
+            - name: APIKEY
+              valueFrom:
+                secretKeyRef:
+                  name: servarr-apikeys
+                  key: sonarr-api-key
+            - name: TX_USER
+              valueFrom:
+                secretKeyRef:
+                  name: transmission-auth
+                  key: username
+            - name: TX_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: transmission-auth
+                  key: password
+          volumeMounts:
+            - name: reconciler-script
+              mountPath: /scripts
+              readOnly: true
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 64Mi
+              cpu: 100m
+
+      volumes:
+        - name: sonarr-config
+          persistentVolumeClaim:
+            claimName: sonarr-local-config-pvc
+        - name: media
+          persistentVolumeClaim:
+            claimName: media-pvc
+        - name: downloads
+          persistentVolumeClaim:
+            claimName: transmission-downloads-pvc
+        - name: reconciler-script
+          configMap:
+            name: servarr-reconciler-script
+            defaultMode: 0555
+
+      restartPolicy: Always

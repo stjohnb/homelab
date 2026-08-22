@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bin-scraper
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: bin-scraper
+  template:
+    metadata:
+      labels:
+        app: bin-scraper
+    spec:
+      securityContext:
+        fsGroup: 1000
+      automountServiceAccountToken: false
+      priorityClassName: low-priority
+      enableServiceLinks: false
+      imagePullSecrets:
+      - name: ghcr-pull
+      containers:
+      - name: bin-scraper-container
+        image: ghcr.io/st-john-software/bin-scraper:20260821-2027-8503a29
+        ports:
+        - containerPort: 3000
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        livenessProbe:
+          httpGet:
+            path: /version
+            port: 3000
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 5
+        startupProbe:
+          httpGet:
+            path: /version
+            port: 3000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /version
+            port: 3000
+          periodSeconds: 10
+          timeoutSeconds: 5
+        env:
+        - name: MQTT_HOST
+          value: home-assistant.default.svc.cluster.local
+        - name: MQTT_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: bin-scraper-mqtt
+              key: username
+        - name: MQTT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: bin-scraper-mqtt
+              key: password
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: bin-scraper-gh-token
+              key: token
+        - name: DB_PATH
+          value: /data/bin-scraper.db
+        - name: SCRAPER_POSTCODE
+          valueFrom:
+            secretKeyRef:
+              name: bin-scraper-address
+              key: postcode
+        - name: REPORTER_POSTCODE
+          valueFrom:
+            secretKeyRef:
+              name: bin-scraper-address
+              key: postcode
+        - name: REPORTER_ADDRESS_MATCH
+          valueFrom:
+            secretKeyRef:
+              name: bin-scraper-address
+              key: address-match
+        - name: OIDC_ISSUER
+          value: https://auth.home.bstjohn.net/application/o/bin-scraper/
+        - name: OIDC_CLIENT_ID
+          value: bin-scraper
+        - name: OIDC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: authentik-secrets
+              key: BIN_SCRAPER_OIDC_CLIENT_SECRET
+        - name: OIDC_REDIRECT_URI
+          value: https://bin-scraper.home.bstjohn.net/auth/callback
+        - name: SESSION_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: bin-scraper-session
+              key: session-secret
+        - name: SESSION_COOKIE_SECURE
+          value: "true"
+        - name: TRUST_PROXY
+          value: "1"
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: bin-scraper-data

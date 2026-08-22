@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: authentik-postgresql-ingress-restricted
+  labels:
+    app: authentik-postgresql
+spec:
+  podSelector:
+    matchLabels:
+      app: authentik-postgresql
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only the Authentik server and worker talk to this database. It holds
+    # session, cache, channel-layer and task state for the SSO system fronting
+    # every protected service, so no other pod in `default` should reach 5432.
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [authentik-server, authentik-worker]
+      ports:
+        - protocol: TCP
+          port: 5432

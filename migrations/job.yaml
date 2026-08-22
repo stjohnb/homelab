@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migration-runner
+  namespace: default
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: enabled
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 0
+  # Bumped from 120 → 600 to accommodate migration 0006, which scales down
+  # Transmission and waits for PVC/PV deletion (can take several minutes).
+  # Future migrations that add slow operations should verify this is sufficient.
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      serviceAccountName: migration-runner
+      restartPolicy: Never
+      containers:
+        - name: runner
+          image: alpine/k8s:1.33.3
+          command: [bash, /runner/run-migrations.sh, /migrations]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: runner
+              mountPath: /runner
+              readOnly: true
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+      volumes:
+        - name: runner
+          configMap:
+            name: migration-runner-script
+            defaultMode: 0755
+        - name: migrations
+          configMap:
+            name: migration-scripts
+            defaultMode: 0755

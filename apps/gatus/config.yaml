@@ -1,0 +1,329 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gatus-config
+data:
+  config.yaml: |
+    metrics: true
+
+    storage:
+      type: memory
+
+    alerting:
+      slack:
+        webhook-url: ${SLACK_WEBHOOK_URL}
+        default-alert:
+          enabled: true
+          description: "Service is down"
+          send-on-resolved: true
+          failure-threshold: 3
+          success-threshold: 2
+
+    # Services behind Authentik ForwardAuth use internal cluster URLs to
+    # bypass SSO redirects. Services without ForwardAuth (Homepage,
+    # Bin Scraper, Home Assistant, etc.) use external HTTPS URLs to
+    # validate the full ingress path (TLS, DNS, routing).
+    endpoints:
+      # DNS endpoint — queries the cluster resolver (10.43.0.10) directly for an
+      # external name. CoreDNS forwards to a resolv.conf it snapshots at pod
+      # start; when node k3s's resolv.conf changed underneath it on 2026-08-15
+      # this returned SERVFAIL for 35h with nothing watching. github.com is used
+      # because Flux and GHCR both depend on resolving it.
+      - name: Cluster DNS
+        group: infrastructure
+        url: "10.43.0.10"
+        interval: 60s
+        dns:
+          query-name: "github.com"
+          query-type: "A"
+        conditions:
+          - "[DNS_RCODE] == NOERROR"
+          - "len([BODY]) > 0"
+        alerts:
+          - type: slack
+            description: "Cluster DNS (CoreDNS at 10.43.0.10) cannot resolve external names — run: kubectl rollout restart deployment coredns -n kube-system"
+
+      - name: Authentik
+        url: "http://authentik-server:9000/-/health/live/"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      # Internal URL — behind ForwardAuth
+      - name: Grafana
+        url: "http://kube-prometheus-stack-grafana:80/api/health"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      # Internal URL — behind ForwardAuth
+      - name: Prometheus
+        url: "http://kube-prometheus-stack-prometheus:9090/-/healthy"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      # External HTTPS — no ForwardAuth, validates full ingress path
+      - name: Homepage
+        url: "https://home.bstjohn.net"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      # External HTTPS — no ForwardAuth
+      - name: Bin Scraper
+        group: bin-scraper
+        url: "https://bin-scraper.home.bstjohn.net/version"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+            description: "Bin Scraper service is down"
+
+      # External HTTPS — no ForwardAuth
+      - name: Bin Scraper Health
+        group: bin-scraper
+        url: "https://bin-scraper.home.bstjohn.net/health"
+        interval: 300s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+            description: "Bin Scraper scraping has been failing for 6+ hours"
+
+      # External HTTPS — verifies OIDC actually initialised (regression guard
+      # for the auth_unconfigured outage, issue #790). /auth/status is ungated.
+      - name: Bin Scraper Auth
+        group: bin-scraper
+        url: "https://bin-scraper.home.bstjohn.net/auth/status"
+        interval: 300s
+        conditions:
+          - "[STATUS] == 200"
+          - "[BODY].oidcEnabled == true"
+        alerts:
+          - type: slack
+            description: "Bin Scraper OIDC is not configured — UI will return auth_unconfigured"
+
+      # External HTTPS — no ForwardAuth
+      - name: Home Assistant
+        url: "https://home-assistant.home.bstjohn.net"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      - name: Awtrix
+        url: "https://awtrix.home.bstjohn.net/screen"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      # Internal URL — behind ForwardAuth
+      - name: Mealie
+        url: "http://mealie:9000"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      - name: Vaultwarden
+        url: "http://vaultwarden:80/alive"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      # Internal URL — behind ForwardAuth
+      - name: Prowlarr
+        url: "http://prowlarr:9696/ping"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      # Internal URL — behind ForwardAuth
+      - name: Overseerr
+        url: "http://overseerr:5055"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      # Internal URL — OIDC auth (not ForwardAuth), status endpoint is unauthenticated
+      - name: Jellyseerr
+        url: "http://jellyseerr:5055/api/v1/status/appdata"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      # Seerr preview running beside Jellyseerr (#820); same unauthenticated
+      # appdata endpoint.
+      - name: Seerr
+        url: "http://seerr:5055/api/v1/status/appdata"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      # Plex and Jellyfin run on the always-on node (k3s) since #800 and read
+      # media over a soft NFS mount, so they stay up while the NAS sleeps — a
+      # failure here is real and alerts.
+      - name: Jellyfin
+        url: "http://jellyfin:8096/health"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      - name: Plex
+        url: "https://plex.home.bstjohn.net/identity"
+        interval: 300s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      # Media services — still pinned to k3s-nas; down when the NAS sleeps,
+      # by design.
+      # No Slack alerts configured: when the NAS is down (expected regular
+      # occurrence), these services cascade-fail and would generate noise.
+      # The NAS alert (below) is the authoritative signal.
+      # Status is still visible in the Gatus dashboard.
+
+      # Internal URL — behind ForwardAuth
+      - name: Sonarr
+        group: media-services
+        url: "http://sonarr:8989/ping"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+
+      # Internal URL — behind ForwardAuth
+      - name: Radarr
+        group: media-services
+        url: "http://radarr:7878/ping"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+
+      # Internal URL — behind ForwardAuth
+      - name: Bazarr
+        group: media-services
+        url: "http://bazarr:6767/ping"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+
+      - name: Immich
+        group: media-services
+        url: "https://immich.home.bstjohn.net/api/server/ping"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+
+      # Internal URL — behind ForwardAuth
+      - name: Transmission
+        group: media-services
+        url: "http://transmission:9091/transmission/web/"
+        interval: 60s
+        conditions:
+          - "[STATUS] < 500"
+
+      - name: Proxmox
+        url: "https://proxmox.home.bstjohn.net"
+        interval: 120s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      - name: UniFi
+        url: "https://unifi.home.bstjohn.net"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      - name: NAS
+        group: infrastructure
+        url: "tcp://192.168.0.128:2049"
+        interval: 60s
+        conditions:
+          - "[CONNECTED] == true"
+        alerts:
+          - type: slack
+            description: "NAS is down — Sonarr, Radarr, Bazarr, Immich, and Transmission will also be unavailable"
+            failure-threshold: 3
+            success-threshold: 2
+
+      - name: Claws
+        url: "https://claws.home.bstjohn.net/health"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      # Internal URL — behind ForwardAuth
+      - name: Datasette
+        url: "http://datasette:8001/-/versions.json"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      # External HTTPS — no ForwardAuth
+      - name: Forgejo
+        url: "https://git.home.bstjohn.net/api/healthz"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      - name: Ollama
+        url: "http://ollama:11434/api/version"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      - name: Whisper
+        url: "http://whisper:9000/openapi.json"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack
+
+      # Internal URL — OIDC auth (not ForwardAuth), /health is unauthenticated
+      - name: Chat
+        url: "http://open-webui:8080/health"
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: slack

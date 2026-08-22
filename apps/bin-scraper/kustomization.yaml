@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - address-secret.enc.yaml
+
+# NOTE: bin-scraper requires pre-created Secrets that are NOT in Git:
+#   - `bin-scraper-mqtt` with keys `username` and `password`
+#   - `bin-scraper-gh-token` with key `token` (GitHub PAT; surfaced to the
+#     container as the GITHUB_TOKEN env var, which is the name the app reads)
+#   - `bin-scraper-session` with key `session-secret` (created by migration
+#     0020-bin-scraper-session-secret.sh)
+#
+# We intentionally do NOT generate them here because Flux only has what is in Git,
+# and we never commit credentials.
+#
+# address-secret.enc.yaml is SOPS-encrypted (age, see .sops.yaml) and holds the
+# home postcode/address match for the scraper and missed-bin reporter — PII that
+# must never appear in plaintext in Git (this repo has a public mirror).

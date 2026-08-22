@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claws-staging
+  namespace: default
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: claws-staging
+  template:
+    metadata:
+      labels:
+        app: claws-staging
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: standard
+      imagePullSecrets:
+        - name: ghcr-pull
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: claws
+          image: ghcr.io/st-john-software/claws:v2026-05-09.2
+          env:
+            - name: CLAWS_ACTIVATION_STATE
+              value: verify-only
+            - name: CLAWS_OIDC_CLIENT_ID
+              value: claws
+            - name: CLAWS_OIDC_BASE_URL
+              value: https://auth.home.bstjohn.net
+            - name: CLAWS_OIDC_APPLICATION_SLUG
+              value: claws
+            - name: CLAWS_OIDC_REDIRECT_URI
+              value: https://claws-staging.home.bstjohn.net/auth/callback
+            - name: CLAWS_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: CLAWS_OIDC_CLIENT_SECRET
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            failureThreshold: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /home/claws/.claws
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: claws-staging-data

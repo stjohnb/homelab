@@ -1,0 +1,50 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - priority-classes.yaml
+  - wildcard-home-cert.yaml
+  - ghcr-pull-secret.enc.yaml
+  - bin-scraper
+  - home-assistant
+  - unifi
+  - proxmox
+  - plex
+  - homepage
+  - awtrix
+  - gatus
+  - servarr/shared-pvcs.yaml
+  - servarr/servarr-apikeys.enc.yaml
+  - servarr/transmission
+  - servarr/sonarr
+  - servarr/radarr
+  - servarr/prowlarr
+  - servarr/bazarr
+  - servarr/overseerr
+  - jellyfin
+  - jellyseerr
+  - seerr
+  - immich
+  - monitoring
+  - arpwatch
+  - mealie
+  - vaultwarden
+  - claws
+  - containerd-gc
+  - config-backup
+  - forgejo
+  - forgejo-runner
+  - datasette
+  - truenas-gate
+  - authentik
+  - headlamp
+  - nvidia-device-plugin
+  - ollama
+  - open-webui
+  - whisper
+
+configMapGenerator:
+  # Shared config-reconciler sidecar script for Sonarr and Radarr. The name
+  # suffix hash means editing the script rolls both pods automatically.
+  - name: servarr-reconciler-script
+    files:
+      - reconcile.sh=servarr/reconcile-config.sh

@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - kube-prometheus-stack.yaml
+  - ingress-ext.yaml
+  - grafana-networkpolicy.yaml
+  - prometheus-networkpolicy.yaml
+  - grafana-github-alerts-networkpolicy.yaml
+  - pve-exporter/deployment.yaml
+  - pve-exporter/service.yaml
+  - dashboards/pvc-capacity-dashboard.yaml
+  - dashboards/authentik-dashboard.yaml
+  - dashboards/proxmox-temperature-dashboard.yaml
+  - grafana-github-alerts

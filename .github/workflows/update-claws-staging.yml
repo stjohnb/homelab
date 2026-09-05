@@ -1,0 +1,108 @@
+---
+name: Update claws-staging image
+
+# Triggers removed for the public snapshot — this workflow is intentionally disabled.
+# See the private source repository for the active version.
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: claws-staging-update
+  cancel-in-progress: false
+
+# sed/git for the tag bump come from this repo's flake.nix `scripts` devShell
+# (mkShell's stdenv provides sed and the coreutils) via the job-level default
+# shell — the self-hosted NixOS runners provide only nix/git/docker. The
+# preflight step runs before checkout, so no flake exists yet: it overrides
+# the default shell with plain bash and uses only bash builtins.
+jobs:
+  update:
+    runs-on: [self-hosted, linux]
+    defaults:
+      run:
+        shell: nix --extra-experimental-features nix-command --extra-experimental-features flakes develop ${{ github.workspace }}#scripts --command bash -euo pipefail {0}
+    steps:
+      - name: Preflight — require FLEET_INFRA_VERSION_BUMP
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.FLEET_INFRA_VERSION_BUMP }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN}" ]; then
+            echo "::error::FLEET_INFRA_VERSION_BUMP is missing or empty." \
+              "Recreate the org-level fine-grained PAT — see docs/infrastructure-overview.md."
+            exit 1
+          fi
+
+      # PAT checkout (not GITHUB_TOKEN) so the bump branch push and PR are authored
+      # by a real user account — GITHUB_TOKEN-authored PRs do not trigger
+      # pull_request workflows, so ci.yml would never run on the bump branch and
+      # Claws' auto-merger would skip the PR (it requires passing checks).
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.FLEET_INFRA_VERSION_BUMP }}
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Validate tag
+        env:
+          NEW_TAG: ${{ inputs.tag }}
+        run: |
+          [[ "${NEW_TAG}" =~ ^v[0-9]{4}-[0-9]{2}-[0-9]{2}\.[0-9]+$ ]] \
+            || { echo "Invalid tag format: ${NEW_TAG}"; exit 1; }
+
+      # Matched across apps/claws/*.yaml rather than a hard-coded file: claws#2752
+      # replaces the staging Deployment + PVC with a StatefulSet, renaming the
+      # manifest. The guard fails the run if no file in that directory references
+      # the image at all, so a rename that drops the reference is noticed instead
+      # of silently producing no-op runs forever.
+      - name: Update image tag
+        id: update-tag
+        env:
+          NEW_TAG: ${{ inputs.tag }}
+        run: |
+          if ! grep -q 'ghcr\.io/st-john-software/claws:' apps/claws/*.yaml; then
+            echo "::error::No manifest under apps/claws/ references" \
+              "ghcr.io/st-john-software/claws — the image reference was renamed or removed." \
+              "Update this workflow to match."
+            exit 1
+          fi
+          sed -i \
+            "s|ghcr.io/st-john-software/claws:[^ ]*|ghcr.io/st-john-software/claws:${NEW_TAG}|g" \
+            apps/claws/*.yaml
+          if git diff --quiet apps/claws; then
+            echo "Image already at ${NEW_TAG}, nothing to do."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Same pattern as prod-infra's bump-app-version.yml: the automation/bump-*
+      # branch prefix plus the auto-bump label mark this PR for Claws' auto-merger,
+      # which merges it once ci.yml passes. No native GitHub auto-merge — with no
+      # required status checks on main, enablePullRequestAutoMerge is rejected
+      # ("clean status") whenever GitHub computes mergeability before we call it.
+      #
+      # Fixed branch, NOT automation/bump-claws-staging-<tag> like garden/bin-scraper:
+      # claws cuts a release on every push to main (14 on 2026-09-01 alone), so
+      # per-tag branches would stack multiple open PRs off the same main and the
+      # second to merge would conflict forever. One branch means
+      # create-pull-request force-updates the single open PR to the newest tag.
+      - name: Open pull request
+        if: steps.update-tag.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
+        with:
+          token: ${{ secrets.FLEET_INFRA_VERSION_BUMP }}
+          branch: automation/bump-claws-staging
+          delete-branch: true
+          commit-message: "chore(claws-staging): update image to ${{ inputs.tag }}"
+          title: "chore(claws-staging): update image to ${{ inputs.tag }}"
+          body: |
+            Automated image update — new claws release.
+
+            Triggered by @${{ github.event.sender.login }} via run ${{ github.run_id }}.
+          labels: dependencies,auto-bump

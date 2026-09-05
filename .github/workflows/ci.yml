@@ -1,0 +1,595 @@
+---
+name: CI
+
+# Triggers removed for the public snapshot — this workflow is intentionally disabled.
+# See the private source repository for the active version.
+on:
+  workflow_dispatch:
+# Least privilege by default: every job here only checks out and lints/scans
+# the repo. The two jobs that need more (kustomize-diff → pull-requests: write,
+# image-verify → packages: read) declare their own permissions block, which
+# REPLACES this one rather than merging with it — so each must also keep
+# listing contents: read.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# The org's CI runs on self-hosted NixOS runners, and every tool this
+# workflow shells out to — yamllint, kustomize, kubeconform, kubesec, trivy,
+# gitleaks, yq, jq, crane, node — comes from this repo's own flake.nix via
+# `nix develop`, isolated in the nix store from whatever other repos put on
+# the same runners. Do NOT add setup actions, sudo/apt-get, or curl-a-binary
+# installers; add tools to flake.nix instead.
+env:
+  # Don't rely on the runner's nix.conf having flakes turned on.
+  NIX_FLAGS: --extra-experimental-features nix-command --extra-experimental-features flakes
+
+jobs:
+  yaml-lint:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Run yamllint
+        run: nix $NIX_FLAGS develop --command yamllint .
+
+  kustomize-validate:
+    runs-on: [self-hosted, linux]
+    defaults:
+      run:
+        shell: nix --extra-experimental-features nix-command --extra-experimental-features flakes develop ${{ github.workspace }}#default --command bash -euo pipefail {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Validate kustomize overlays
+        run: |
+          find . -name kustomization.yaml -exec dirname {} \; | while read -r dir; do
+            echo "Validating $dir"
+            kustomize build "$dir" > /dev/null
+          done
+
+  kubeconform:
+    runs-on: [self-hosted, linux]
+    needs: kustomize-validate
+    defaults:
+      run:
+        shell: nix --extra-experimental-features nix-command --extra-experimental-features flakes develop ${{ github.workspace }}#default --command bash -euo pipefail {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Download Flux CRD schemas
+        run: |
+          mkdir -p /tmp/flux-crd-schemas
+          curl -sSL https://github.com/fluxcd/flux2/releases/download/v2.8.3/crd-schemas.tar.gz \
+            | tar xz -C /tmp/flux-crd-schemas
+
+      - name: Validate manifests with kubeconform
+        run: |
+          # SOPS-encrypted Secrets carry a top-level `sops:` field that fails
+          # strict schema validation. Flux decrypts at apply time; for offline
+          # checks, strip the `sops` field before piping to kubeconform.
+          find . -name kustomization.yaml -exec dirname {} \; | while read -r dir; do
+            echo "Validating $dir"
+            kustomize build "$dir" \
+              | python3 -c 'import sys, yaml; docs=[d for d in yaml.safe_load_all(sys.stdin) if d];
+          [d.pop("sops", None) for d in docs if isinstance(d, dict)];
+          sys.stdout.write(yaml.safe_dump_all(docs))' \
+              | kubeconform -strict \
+                -ignore-missing-schemas \
+                -schema-location default \
+                -schema-location "/tmp/flux-crd-schemas/{{.Group}}_{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
+          done
+
+  security-scan:
+    runs-on: [self-hosted, linux]
+    needs: kustomize-validate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Security scan with kubesec
+        run: nix $NIX_FLAGS develop --command ./scripts/check-kubesec.sh
+
+  image-scan:
+    runs-on: [self-hosted, linux]
+    needs: kustomize-validate
+    if: github.event_name == 'pull_request'
+    defaults:
+      run:
+        shell: nix --extra-experimental-features nix-command --extra-experimental-features flakes develop ${{ github.workspace }}#default --command bash -euo pipefail {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Scan container images for vulnerabilities
+        run: |
+          set +e
+          echo "Extracting container image references changed in this PR..."
+
+          # Filter: images with a "/" (registry/org prefix) or ":" followed by a digit
+          # (version-tagged). This intentionally excludes shorthand images with
+          # non-numeric tags (e.g. redis:latest, nginx:alpine) — in practice this
+          # repo pins versions with digits, so this trade-off avoids false positives
+          # from non-image "image:" keys while catching all real references.
+          CHANGED_IMAGES=$(git diff origin/main...HEAD -- 'apps/**/*.yaml' 'apps/**/*.yml' 'clusters/**/*.yaml' 'clusters/**/*.yml' \
+              'migrations/*.yaml' 'migrations/*.yml' 'migrations/**/*.yaml' 'migrations/**/*.yml' \
+            | grep '^+' | grep -v '^\+\+\+' | grep 'image:' | sed 's/.*image:[[:space:]]*//' \
+            | awk '{print $1}' | tr -d '"'"'" | grep -E '(/|:[0-9])' | sort -u)
+
+          if [ -z "$CHANGED_IMAGES" ]; then
+            echo "No container image changes detected in this PR"
+            echo "✅ Image vulnerability scan skipped (no image changes)"
+            exit 0
+          fi
+
+          IMAGE_COUNT=$(echo "$CHANGED_IMAGES" | wc -l)
+          echo "Found $IMAGE_COUNT changed/new images to scan"
+          echo ""
+
+          FAILED=0
+          SKIPPED=0
+          PASSED=0
+
+          echo "Updating Trivy vulnerability databases..."
+          trivy image --download-db-only --no-progress 2>/dev/null || true
+          trivy image --download-java-db-only --no-progress 2>/dev/null || true
+          echo ""
+
+          while IFS= read -r IMAGE; do
+            [ -z "$IMAGE" ] && continue
+            echo "Scanning: $IMAGE"
+
+            TRIVY_OUTPUT=$(trivy image \
+              --severity CRITICAL \
+              --exit-code 1 \
+              --no-progress \
+              --skip-db-update \
+              --skip-java-db-update \
+              --ignorefile .trivyignore \
+              --timeout 5m \
+              "$IMAGE" 2>/tmp/trivy-err.txt)
+            EXIT_CODE=$?
+
+            if [ $EXIT_CODE -eq 0 ]; then
+              echo "✅ No CRITICAL vulnerabilities found"
+              PASSED=$((PASSED + 1))
+            elif grep -qi "UNAUTHORIZED\|denied\|authentication required\|401\|no such host\|connection refused\|i/o timeout\|dial tcp" /tmp/trivy-err.txt 2>/dev/null; then
+              echo "⚠️  Skipped (authentication required)"
+              SKIPPED=$((SKIPPED + 1))
+            else
+              echo "$TRIVY_OUTPUT"
+              cat /tmp/trivy-err.txt 2>/dev/null
+              echo "❌ CRITICAL vulnerabilities found"
+              FAILED=$((FAILED + 1))
+            fi
+            echo ""
+          done <<< "$CHANGED_IMAGES"
+
+          echo "Passed: $PASSED | Failed: $FAILED | Skipped: $SKIPPED"
+
+          if [ $FAILED -gt 0 ]; then
+            echo "❌ Image vulnerability scan failed - CRITICAL CVEs must be fixed"
+            exit 1
+          fi
+          echo "✅ Image vulnerability scan complete"
+
+  secret-detection:
+    runs-on: [self-hosted, linux]
+    defaults:
+      run:
+        shell: nix --extra-experimental-features nix-command --extra-experimental-features flakes develop ${{ github.workspace }}#default --command bash -euo pipefail {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Detect secrets
+        run: |
+          echo "Scanning for secrets..."
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            gitleaks detect --log-opts="origin/main..HEAD" --verbose --redact
+          else
+            if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+              echo "Initial push detected — scanning all commits"
+              gitleaks detect --verbose --redact
+            else
+              gitleaks detect --log-opts="${{ github.event.before }}..${{ github.event.after }}" --verbose --redact
+            fi
+          fi
+          echo "✅ No secrets detected"
+
+  kustomization-completeness:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Check kustomization.yaml completeness
+        run: nix $NIX_FLAGS develop --command ./scripts/check-completeness.sh
+
+  ingress-uniqueness:
+    runs-on: [self-hosted, linux]
+    needs: kustomize-validate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Check ingress hostname uniqueness
+        run: nix $NIX_FLAGS develop --command ./scripts/check-ingress-uniqueness.sh
+
+  gate-netpol:
+    runs-on: [self-hosted, linux]
+    needs: kustomize-validate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Check truenas-gate NetworkPolicy allowances
+        run: nix $NIX_FLAGS develop --command ./scripts/check-gate-netpol.sh
+
+  image-pull-secrets:
+    runs-on: [self-hosted, linux]
+    needs: kustomize-validate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Check imagePullSecrets references resolve
+        run: nix $NIX_FLAGS develop --command ./scripts/check-image-pull-secrets.sh
+
+  grafana-alert-uids:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Check Grafana provisioned alert UIDs
+        run: nix $NIX_FLAGS develop --command ./scripts/check-grafana-alert-uids.sh
+
+  migration-exec-secrets:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Check migrations do not exec secrets as arguments
+        run: nix $NIX_FLAGS develop --command ./scripts/check-migration-exec-secrets.sh
+
+  migration-secret-rbac:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Check migration Secret reads have RBAC get grants
+        run: nix $NIX_FLAGS develop --command ./scripts/check-migration-secret-rbac.sh
+
+  renovate-check:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Validate Renovate config
+        run: nix $NIX_FLAGS develop --command npx --yes --package renovate -- renovate-config-validator
+
+  trivyignore-check:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Validate .trivyignore governance
+        run: nix $NIX_FLAGS develop --command ./scripts/check-trivyignore.sh
+
+  image-consistency:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Check image tag consistency
+        run: nix $NIX_FLAGS develop --command ./scripts/check-image-tag-consistency.sh
+
+  kustomize-diff:
+    runs-on: [self-hosted, linux]
+    if: github.event_name == 'pull_request'
+    needs: kustomize-validate
+    permissions:
+      contents: read
+      pull-requests: write
+    defaults:
+      run:
+        shell: nix --extra-experimental-features nix-command --extra-experimental-features flakes develop ${{ github.workspace }}#default --command bash -euo pipefail {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Build and diff manifests
+        id: kustomize-diff
+        run: |
+          # Overlays to include in the diff (single source of truth)
+          mapfile -t OVERLAYS < <(./scripts/overlays.sh | cut -d: -f1)
+          if [ "${#OVERLAYS[@]}" -eq 0 ]; then
+            echo "❌ scripts/overlays.sh produced no overlays"
+            exit 1
+          fi
+
+          # Build all overlays from a root directory into a single manifest file
+          build_overlays() {
+            local root="$1" output="$2"
+            : > "$output"
+            for overlay in "${OVERLAYS[@]}"; do
+              local dir="${root}/${overlay}"
+              if [ -d "$dir" ]; then
+                echo "--- # Source: ${overlay}" >> "$output"
+                kustomize build "$dir" >> "$output" 2>/dev/null || true
+              fi
+            done
+          }
+
+          # Build PR manifests
+          build_overlays "." /tmp/pr-manifests.yaml
+
+          # Build base branch in an isolated worktree.
+          # Clean up any stale worktree from a previous cancelled/failed run
+          # (self-hosted runners persist /tmp, and `concurrency:
+          # cancel-in-progress` above kills runs mid-step). `prune` clears the
+          # matching admin metadata under .git/worktrees, which also survives
+          # between runs and would otherwise make `worktree add` fail.
+          git worktree remove /tmp/base-branch 2>/dev/null || true
+          rm -rf /tmp/base-branch
+          git worktree prune
+
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          git worktree add /tmp/base-branch "$BASE_SHA"
+          trap 'git worktree remove --force /tmp/base-branch 2>/dev/null || true; rm -rf /tmp/base-branch' EXIT
+          build_overlays /tmp/base-branch /tmp/base-manifests.yaml
+          git worktree remove /tmp/base-branch
+
+          # Generate unified diff
+          DIFF=$(diff -u --label base --label pr \
+            /tmp/base-manifests.yaml /tmp/pr-manifests.yaml || true)
+
+          # Build comment body
+          if [ -z "$DIFF" ]; then
+            cat > /tmp/comment-body.md << 'EOF'
+          <!-- kustomize-diff -->
+          ### Kustomize Build Diff
+
+          No changes to rendered Kubernetes manifests.
+          EOF
+          else
+            ADDED=$(echo "$DIFF" | grep -c '^+[^+]' || true)
+            REMOVED=$(echo "$DIFF" | grep -c '^-[^-]' || true)
+
+            TRUNCATED=""
+            if [ ${#DIFF} -gt 60000 ]; then
+              DIFF="${DIFF:0:60000}"
+              TRUNCATED=$'\n\n> Diff truncated (exceeds comment size limit)'
+            fi
+
+            {
+              echo '<!-- kustomize-diff -->'
+              echo '### Kustomize Build Diff'
+              echo ''
+              echo "**+${ADDED} −${REMOVED} lines** in rendered manifests"
+              echo ''
+              echo '<details>'
+              echo '<summary>Click to expand</summary>'
+              echo ''
+              echo '```diff'
+              echo "$DIFF"
+              echo '```'
+              echo "${TRUNCATED}"
+              echo '</details>'
+            } > /tmp/comment-body.md
+          fi
+
+          # Serialize the API payload for the comment step (which runs in the
+          # `scripts` devShell and has gh, not jq).
+          jq -Rs '{body: .}' /tmp/comment-body.md > /tmp/comment-payload.json
+
+      - name: Post diff comment
+        # Overrides the job-level `default` devShell: gh lives in `scripts`.
+        # gh reads GH_TOKEN from the environment, so the token is never in a
+        # process's argv where another job on this shared runner could read it
+        # from `ps` or /proc/<pid>/cmdline.
+        shell: nix --extra-experimental-features nix-command --extra-experimental-features flakes develop .#scripts --command bash -euo pipefail {0}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          # Find existing bot comment (update in place on re-push).
+          COMMENT_ID=$(gh api "repos/${REPO}/issues/${PR_NUM}/comments?per_page=100" \
+            --jq '[.[] | select(.body | startswith("<!-- kustomize-diff -->"))] | first | .id // empty' || true)
+
+          if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
+            if gh api --method PATCH "repos/${REPO}/issues/comments/${COMMENT_ID}" \
+              --input /tmp/comment-payload.json > /dev/null; then
+              echo "✅ Updated existing diff comment"
+            else
+              echo "::warning::Failed to update kustomize-diff comment"
+            fi
+          else
+            if gh api --method POST "repos/${REPO}/issues/${PR_NUM}/comments" \
+              --input /tmp/comment-payload.json > /dev/null; then
+              echo "✅ Posted diff comment"
+            else
+              echo "::warning::Failed to post kustomize-diff comment"
+            fi
+          fi
+
+  image-verify:
+    runs-on: [self-hosted, linux]
+    if: github.event_name == 'pull_request'
+    needs: kustomize-validate
+    # Non-blocking: failures warn but do not block merge.
+    # Remove continue-on-error once reliability is proven in production.
+    continue-on-error: true
+    permissions:
+      contents: read
+      packages: read
+    defaults:
+      run:
+        shell: nix --extra-experimental-features nix-command --extra-experimental-features flakes develop ${{ github.workspace }}#default --command bash -euo pipefail {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Authenticate to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GITHUB_TOKEN" | crane auth login ghcr.io -u x-access-token --password-stdin
+
+      - name: Extract changed images
+        run: |
+          mapfile -t OVERLAYS < <(./scripts/overlays.sh | cut -d: -f1)
+          if [ "${#OVERLAYS[@]}" -eq 0 ]; then
+            echo "❌ scripts/overlays.sh produced no overlays"
+            exit 1
+          fi
+
+          extract_images() {
+            local root="$1" output="$2"
+            : > "$output"
+            for overlay in "${OVERLAYS[@]}"; do
+              local dir="${root}/${overlay}"
+              if [ -d "$dir" ]; then
+                kustomize build "$dir" 2>/dev/null || true
+              fi
+            done | grep -E '^\s+image:\s' \
+              | sed 's/.*image:[[:space:]]*//' \
+              | awk '{print $1}' | tr -d "\"'" \
+              | sort -u >> "$output"
+          }
+
+          # Build PR branch images
+          extract_images "." /tmp/pr-images.txt
+
+          # Build base branch images in an isolated worktree
+          # Clean up any stale worktree from a previous failed run (self-hosted runners persist /tmp)
+          git worktree remove /tmp/base-branch-image-verify 2>/dev/null || true
+          rm -rf /tmp/base-branch-image-verify 2>/dev/null || true
+
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          git worktree add /tmp/base-branch-image-verify "$BASE_SHA"
+          trap 'git worktree remove /tmp/base-branch-image-verify 2>/dev/null || true' EXIT
+          extract_images /tmp/base-branch-image-verify /tmp/base-images.txt
+          git worktree remove /tmp/base-branch-image-verify
+
+          # Compute images present in PR but not in base (new or changed)
+          comm -13 \
+            <(sort /tmp/base-images.txt) \
+            <(sort /tmp/pr-images.txt) \
+            > /tmp/changed-images.txt
+
+          CHANGED_COUNT=$(grep -c . /tmp/changed-images.txt 2>/dev/null || echo 0)
+          echo "Changed/new images to verify: $CHANGED_COUNT"
+          cat /tmp/changed-images.txt
+
+      - name: Verify images with crane
+        run: |
+          if [ ! -s /tmp/changed-images.txt ]; then
+            echo "No changed images detected — skipping verification"
+            exit 0
+          fi
+
+          FAILED=0
+          PASSED=0
+          SKIPPED=0
+
+          while IFS= read -r IMAGE; do
+            [ -z "$IMAGE" ] && continue
+            echo "Verifying: $IMAGE"
+
+            if crane manifest "$IMAGE" > /dev/null 2>/tmp/crane-err.txt; then
+              echo "✅ Image exists"
+              PASSED=$((PASSED + 1))
+            elif grep -qi "UNAUTHORIZED\|denied\|403\|401" /tmp/crane-err.txt 2>/dev/null; then
+              echo "⚠️  Skipped (authentication required)"
+              cat /tmp/crane-err.txt
+              SKIPPED=$((SKIPPED + 1))
+            else
+              cat /tmp/crane-err.txt 2>/dev/null
+              echo "❌ Image not found or not pullable"
+              FAILED=$((FAILED + 1))
+            fi
+            echo ""
+          done < /tmp/changed-images.txt
+
+          echo "Passed: $PASSED | Failed: $FAILED | Skipped: $SKIPPED"
+
+          if [ $FAILED -gt 0 ]; then
+            echo "❌ Image verification failed — check image references above"
+            exit 1
+          fi
+          echo "✅ Image verification complete"

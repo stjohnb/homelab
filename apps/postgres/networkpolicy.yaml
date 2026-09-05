@@ -1,0 +1,34 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-ingress-restricted
+  labels:
+    app: postgres
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  # Applying this policy makes the postgres pod default-deny on the pod network.
+  # An app onboarded later MUST be added to the allow-list below or it will
+  # silently fail to connect. The migration runner needs no entry — it reaches
+  # this pod through the apiserver's pods/exec endpoint, not the pod network.
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [authentik-server, authentik-worker, immich, garden, gatus]
+      ports:
+        - protocol: TCP
+          port: 5432
+    # postgres-db-backup and immich-db-backup pods carry no `app` label.
+    - from:
+        - podSelector:
+            matchLabels:
+              component: db-backup
+      ports:
+        - protocol: TCP
+          port: 5432

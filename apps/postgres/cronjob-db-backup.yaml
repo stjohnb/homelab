@@ -1,0 +1,153 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-db-backup
+  labels:
+    app: postgres
+spec:
+  schedule: "30 2 * * *"
+  timeZone: Europe/London
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1800
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            component: db-backup
+            claws.st-john-software.com/nfs-dependent: "true"
+        spec:
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          restartPolicy: Never
+          # Pinned to the storage node (k3s-nas) because the backups land on the
+          # NFS media share. The NAS is powered off most of the time and this job
+          # is pointless without it, so it must fail cleanly here rather than run
+          # without storage. See docs/nas-k3s.md.
+          nodeSelector:
+            node-role.kubernetes.io/storage: "true"
+          tolerations:
+            - key: node-role.kubernetes.io/storage
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          securityContext:
+            fsGroup: 70
+          initContainers:
+            - name: init-backup-dir
+              image: busybox:1.36
+              command: ["sh", "-c", "mkdir -p /media/backups/postgres && chown 70:70 /media/backups/postgres"]
+              securityContext:
+                runAsUser: 0
+              volumeMounts:
+                - name: media
+                  mountPath: /media
+          containers:
+            - name: pg-dump
+              image: postgres:16-alpine
+              securityContext:
+                runAsUser: 70
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-superuser
+                      key: POSTGRES_PASSWORD
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+
+                  BACKUP_ROOT="/media/backups/postgres"
+
+                  # Wait up to 10 minutes for postgres. An unreachable database
+                  # FAILS rather than exiting 0 — an extended outage must be
+                  # visible, not a silent skip.
+                  echo "Checking postgres availability..."
+                  ATTEMPT=1
+                  until pg_isready --host=postgres --username=postgres --timeout=5 --quiet; do
+                    if [ "${ATTEMPT}" -ge 10 ]; then
+                      echo "FAIL: postgres unreachable after 10 attempts (~10m)"
+                      exit 1
+                    fi
+                    echo "Postgres not ready (attempt ${ATTEMPT}/10), waiting 60s..."
+                    ATTEMPT=$((ATTEMPT + 1))
+                    sleep 60
+                  done
+
+                  # `immich` is deliberately excluded: apps/immich/cronjob-db-backup.yaml
+                  # already dumps it 6-hourly with content assertions (asset/user row
+                  # counts) that this generic job cannot make. `postgres` is the empty
+                  # maintenance database.
+                  DATABASES="$(psql -v ON_ERROR_STOP=1 -h postgres -U postgres -tAc \
+                    "select datname from pg_database where datistemplate = false and datname not in ('postgres', 'immich')")"
+
+                  # Empty is expected during the multi-PR migration onto this shared
+                  # instance, before any app database has moved over yet — not a failure.
+                  if [ -z "${DATABASES}" ]; then
+                    echo "No application databases found on the shared instance yet, nothing to back up."
+                    exit 0
+                  fi
+
+                  echo "Databases to back up:"
+                  echo "${DATABASES}"
+
+                  for DB in ${DATABASES}; do
+                    BACKUP_DIR="${BACKUP_ROOT}/${DB}"
+                    mkdir -p "${BACKUP_DIR}"
+                    BACKUP_FILE="${BACKUP_DIR}/${DB}-$(date +%Y%m%d-%H%M%S).pgdump"
+
+                    echo "Starting pg_dump of ${DB} to ${BACKUP_FILE}..."
+                    pg_dump -h postgres -U postgres -d "${DB}" --format=custom --file="${BACKUP_FILE}"
+
+                    # Post-dump verification. Every failure removes the bad file and
+                    # exits non-zero BEFORE the retention rm, so a bad dump can neither
+                    # be kept nor evict the last good one.
+                    if ! pg_restore --list "${BACKUP_FILE}" > /tmp/toc.txt; then
+                      echo "FAIL: pg_restore --list could not read ${BACKUP_FILE} (corrupt dump)."
+                      rm -f "${BACKUP_FILE}"
+                      exit 1
+                    fi
+
+                    BYTES="$(wc -c < "${BACKUP_FILE}")"
+                    if [ "${BYTES}" -le 0 ]; then
+                      echo "FAIL: dump of ${DB} is ${BYTES} bytes."
+                      rm -f "${BACKUP_FILE}"
+                      exit 1
+                    fi
+
+                    echo "Backup verified: ${BACKUP_FILE} (${BYTES} bytes)"
+
+                    # Grandfather-father-son rotation, same rule as
+                    # immich-db-backup. Only reached on a verified dump.
+                    sh /scripts/gfs-prune.sh "${BACKUP_DIR}" '*.pgdump'
+                    echo "Current backups for ${DB}:"
+                    ls -lht "${BACKUP_DIR}"/*.pgdump
+                  done
+              volumeMounts:
+                - name: media
+                  mountPath: /media
+                - name: retention-script
+                  mountPath: /scripts
+                  readOnly: true
+              resources:
+                requests:
+                  memory: 128Mi
+                limits:
+                  memory: 512Mi
+          volumes:
+            - name: media
+              persistentVolumeClaim:
+                claimName: media-pvc
+            - name: retention-script
+              configMap:
+                name: db-backup-retention-script
+                defaultMode: 0555

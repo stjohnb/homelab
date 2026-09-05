@@ -1,0 +1,101 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: forgejo-backup-offsite
+  labels:
+    app: forgejo
+spec:
+  schedule: "0 3 * * *"
+  timeZone: Europe/London
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 900
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: forgejo
+            component: backup-offsite
+            claws.st-john-software.com/nfs-dependent: "true"
+        spec:
+          # No nodeSelector: mounting the forgejo-backups local-path PVC pins
+          # this pod to node k3s via the PV's node affinity. The NFS PV uses
+          # soft/retry=0 so a powered-off NAS fails the job fast rather than
+          # hanging the control-plane node.
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          restartPolicy: Never
+          initContainers:
+            - name: init-backup-dir
+              image: busybox:1.37
+              command: ["sh", "-c", "mkdir -p /media/backups/forgejo && chown 1000:1000 /media/backups/forgejo"]
+              securityContext:
+                runAsUser: 0
+              volumeMounts:
+                - name: offsite
+                  mountPath: /media
+          containers:
+            - name: sync
+              image: busybox:1.37
+              securityContext:
+                runAsUser: 1000
+                runAsGroup: 1000
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: TZ
+                  value: Europe/London
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  SRC=/backups
+                  DEST=/media/backups/forgejo
+                  COPIED=0
+                  for f in "${SRC}"/forgejo-dump-*.tar.gz; do
+                    if [ ! -e "$f" ]; then
+                      echo "FATAL: /backups holds no forgejo-dump-*.tar.gz."
+                      echo "Stage 1 (forgejo-backup CronJob) has produced no archive."
+                      echo "This is a Stage 1 failure, NOT the NAS being powered off."
+                      echo "Check: kubectl logs -l component=backup -n default"
+                      echo "See docs/forgejo-backups.md."
+                      exit 1
+                    fi
+                    base="$(basename "$f")"
+                    if [ -f "${DEST}/${base}" ]; then continue; fi
+                    echo "Copying ${base}..."
+                    cp "$f" "${DEST}/.${base}.partial"
+                    mv "${DEST}/.${base}.partial" "${DEST}/${base}"
+                    COPIED=$((COPIED + 1))
+                  done
+                  echo "Copied ${COPIED} new dump(s) to NFS."
+                  cd "${DEST}"
+                  ls -t forgejo-dump-*.tar.gz | tail -n +15 | xargs -r rm -v
+                  echo "Offsite backups:"; ls -lht forgejo-dump-*.tar.gz
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+                  readOnly: true
+                - name: offsite
+                  mountPath: /media
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: forgejo-backups
+                readOnly: true
+            - name: offsite
+              persistentVolumeClaim:
+                claimName: forgejo-backup-pvc

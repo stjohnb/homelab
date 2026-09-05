@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authentik-server
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: authentik-server
+  template:
+    metadata:
+      labels:
+        app: authentik-server
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: critical-infrastructure
+      enableServiceLinks: false
+      containers:
+        - name: authentik
+          image: ghcr.io/goauthentik/server:2026.2.1
+          args: ["server"]
+          ports:
+            - containerPort: 9000
+              name: http
+            - containerPort: 9443
+              name: https
+            - containerPort: 9300
+              name: metrics
+          env:
+            - name: AUTHENTIK_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: AUTHENTIK_SECRET_KEY
+            - name: AUTHENTIK_BOOTSTRAP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: AUTHENTIK_BOOTSTRAP_PASSWORD
+            - name: AUTHENTIK_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: AUTHENTIK_BOOTSTRAP_TOKEN
+            - name: AUTHENTIK_POSTGRESQL__HOST
+              value: postgres
+            - name: AUTHENTIK_POSTGRESQL__USER
+              value: authentik
+            - name: AUTHENTIK_POSTGRESQL__NAME
+              value: authentik
+            - name: AUTHENTIK_POSTGRESQL__PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: PG_PASS
+          volumeMounts:
+            - name: blueprints
+              mountPath: /blueprints/custom
+            - name: dshm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1536Mi
+          livenessProbe:
+            httpGet:
+              path: /-/health/live/
+              port: 9000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /-/health/ready/
+              port: 9000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: blueprints
+          configMap:
+            name: authentik-blueprints
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi

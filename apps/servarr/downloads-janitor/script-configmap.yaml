@@ -1,0 +1,187 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: downloads-janitor-script
+  labels:
+    app: downloads-janitor
+data:
+  janitor.sh: |
+    #!/bin/sh
+    # Finds (and optionally deletes) download data Transmission no longer owns.
+    # See docs/servarr.md, Downloads Janitor. Issue #1074.
+    set -eu
+
+    DOWNLOADS_ROOT=/data/downloads
+    RPC_URL="http://transmission.default.svc.cluster.local:9091/transmission/rpc"
+    NOW=$(date +%s)
+    CUTOFF=$((NOW - AGE_DAYS * 86400))
+    # Bounded wait for the Transmission RPC handshake; see the comment at
+    # step 1. `${VAR:-default}` is safe under `set -u`.
+    RPC_WAIT_SECS=${RPC_WAIT_SECS:-120}
+
+    # Immediate subdirectories of downloads/complete/ that Transmission creates
+    # from the Sonarr/Radarr download-client "category" setting. They are
+    # containers, never torrents, so they are scan ROOTS: never deletion
+    # candidates, and descended into so individual downloads inside them are
+    # judged on their own. Without this the whole complete/<category> tree is
+    # one candidate -- a single hardlinked file anywhere under it shields
+    # everything (the janitor could never clean complete/), and an empty
+    # category dir untouched for AGE_DAYS is itself deleted, breaking
+    # Transmission's download path (#1121). Space-separated; category names
+    # containing spaces are not supported.
+    CATEGORY_DIRS=${CATEGORY_DIRS:-"radarr tv-sonarr"}
+
+    # --- 1. Transmission RPC. Every failure here EXITS NON-ZERO. An empty or
+    # unparsed live set would make every download look orphaned, so this must
+    # fail closed, never fall through to the scan.
+    #
+    # The handshake is retried for up to RPC_WAIT_SECS before that verdict.
+    # This pod is short-lived and issues its first request within ~1s of being
+    # assigned a pod IP, but k3s's kube-router NetworkPolicy controller needs a
+    # few seconds to add that new IP to the ipset backing transmission-
+    # isolation's `app In (..., downloads-janitor)` ingress rule. Until it
+    # does, the connect is REJECTed instantly -- `curl: (7) ... after 1 ms:
+    # Could not connect to server` -- which is how every run of this job died
+    # before this loop existed (issue #1084). Measured on 2026-09-03: attempt
+    # at t=0 fails, attempt at t~6s succeeds. Do NOT replace this with a
+    # single longer `sleep`: the retry is what keeps a genuine outage fast to
+    # diagnose and a healthy run near-instant.
+    SID=""
+    WAITED=0
+    while :; do
+      SID=$(curl -s -i -m 30 -X POST "$RPC_URL" \
+        -H 'Content-Type: application/json' -d '{"method":"session-stats"}' \
+        | sed -n 's/^[Xx]-[Tt]ransmission-[Ss]ession-[Ii]d: *\([^ ]*\).*/\1/p' | tr -d '\r')
+      if [ -n "$SID" ]; then break; fi
+      if [ "$WAITED" -ge "$RPC_WAIT_SECS" ]; then break; fi
+      echo "waiting for transmission RPC (${WAITED}s elapsed; NetworkPolicy may still be programming this pod IP)"
+      sleep 5
+      WAITED=$((WAITED + 5))
+    done
+    if [ -z "$SID" ]; then
+      echo "FAIL: no X-Transmission-Session-Id from $RPC_URL after ${RPC_WAIT_SECS}s (transmission down, or NetworkPolicy blocking app=downloads-janitor)" >&2
+      exit 1
+    fi
+    if [ "$WAITED" -gt 0 ]; then echo "Transmission RPC reachable after ${WAITED}s."; fi
+
+    # curl -f trips `set -eu` on HTTP/connection failure before the FAIL
+    # message below runs; curl's own stderr (via -sS) is what an operator
+    # actually sees in the job log for that case.
+    STATS=$(curl -sS -f -m 30 -X POST "$RPC_URL" -H "X-Transmission-Session-Id: $SID" \
+      -H 'Content-Type: application/json' -d '{"method":"session-stats"}')
+    echo "$STATS" | grep -q '"result":"success"' || { echo "FAIL: session-stats: $STATS" >&2; exit 1; }
+    COUNT=$(echo "$STATS" | sed -n 's/.*"torrentCount":\([0-9]*\).*/\1/p')
+    [ -n "$COUNT" ] || { echo "FAIL: could not read torrentCount from: $STATS" >&2; exit 1; }
+
+    # format:"table" guarantees column order, unlike the default object form.
+    # Response shape: "torrents":[["name"],["Torrent A"],["Torrent B"]]
+    RESP=$(curl -sS -f -m 60 -X POST "$RPC_URL" -H "X-Transmission-Session-Id: $SID" \
+      -H 'Content-Type: application/json' \
+      -d '{"method":"torrent-get","arguments":{"fields":["name"],"format":"table"}}')
+    echo "$RESP" | grep -q '"result":"success"' || { echo "FAIL: torrent-get: $RESP" >&2; exit 1; }
+
+    printf '%s' "$RESP" | sed -n 's/.*"torrents":\[\(.*\)\].*/\1/p' \
+      | sed 's/\],\[/\n/g' | sed 's/^\[//; s/\]$//' | tail -n +2 > /tmp/rows
+    : > /tmp/live-names
+    # Redirected from a file, NOT piped: `exit 1` below must kill the script,
+    # not just a subshell.
+    while IFS= read -r ROW; do
+      [ -n "$ROW" ] || continue
+      case "$ROW" in
+        '"'*'"') ;;
+        *) echo "FAIL: unparsable torrent-get row: $ROW" >&2; exit 1 ;;
+      esac
+      # Reverse JSON string escaping after stripping the outer quotes, else a
+      # torrent name containing \" or \\ silently drops out of the live set
+      # below (grep -Fxq never matches) and can be flagged as an orphan.
+      printf '%s\n' "$ROW" \
+        | sed 's/^"//; s/"$//; s/\\\\/@@JANITOR-BS@@/g; s/\\"/"/g; s/\\\//\//g; s/@@JANITOR-BS@@/\\/g' \
+        >> /tmp/live-names
+    done < /tmp/rows
+    PARSED=$(wc -l < /tmp/live-names | tr -d ' ')
+    if [ "$PARSED" -ne "$COUNT" ]; then
+      echo "FAIL: parsed $PARSED torrent names but session-stats reports torrentCount=$COUNT. Refusing to scan." >&2
+      exit 1
+    fi
+    echo "Transmission reports $COUNT live torrent(s)."
+
+    # --- 2. Scan. Matching is by BASENAME, not by path: an in-progress torrent
+    # reports downloadDir=/downloads/complete while its bytes sit in
+    # /downloads/incomplete, so path matching would flag live downloads.
+    #
+    # Roots are complete/, incomplete/, and each existing complete/<category>/
+    # from CATEGORY_DIRS. A path that is itself a root is never a candidate.
+    : > /tmp/roots
+    for SUB in complete incomplete; do
+      DIR="$DOWNLOADS_ROOT/$SUB"
+      if [ ! -d "$DIR" ]; then echo "skip: $DIR does not exist"; continue; fi
+      printf '%s\n' "$DIR" >> /tmp/roots
+    done
+    for CAT in $CATEGORY_DIRS; do
+      CDIR="$DOWNLOADS_ROOT/complete/$CAT"
+      if [ -d "$CDIR" ]; then
+        printf '%s\n' "$CDIR" >> /tmp/roots
+        echo "scan root (category dir): $CDIR"
+      fi
+    done
+
+    FOUND=0; FOUND_KB=0
+    : > /tmp/orphans
+    while IFS= read -r DIR; do
+      find "$DIR" -mindepth 1 -maxdepth 1 -print > /tmp/entries
+      while IFS= read -r ENTRY; do
+        BASE=$(basename "$ENTRY")
+        case "$BASE" in .*) echo "keep (dotfile): $ENTRY"; continue ;; esac
+        if [ -L "$ENTRY" ]; then echo "keep (symlink): $ENTRY"; continue; fi
+        if grep -Fxq "$ENTRY" /tmp/roots; then
+          echo "keep (category dir, scanned as a root): $ENTRY"; continue
+        fi
+        # rename-partial-files (Transmission default) suffixes the on-disk
+        # top-level entry of an in-progress single-file torrent with .part;
+        # torrent-get's name field never includes that suffix.
+        LIVE_BASE=${BASE%.part}
+        if grep -Fxq "$LIVE_BASE" /tmp/live-names; then continue; fi
+        LINES=$(find "$ENTRY" ! -type d -exec stat -c '%h %Y' {} + 2>/dev/null || true)
+        if [ -z "$LINES" ]; then
+          MAXLINK=1
+          NEWEST=$(stat -c '%Y' "$ENTRY")
+        else
+          MAXLINK=$(printf '%s\n' "$LINES" | awk 'BEGIN{m=0}{if($1>m)m=$1}END{print m+0}')
+          NEWEST=$(printf '%s\n' "$LINES" | awk 'BEGIN{m=0}{if($2>m)m=$2}END{print m+0}')
+        fi
+        if [ "$MAXLINK" -gt 1 ]; then
+          echo "keep (hardlinked into library, nlink=$MAXLINK): $ENTRY"; continue
+        fi
+        if [ "$NEWEST" -gt "$CUTOFF" ]; then
+          echo "keep (newest mtime $NEWEST is under ${AGE_DAYS}d): $ENTRY"; continue
+        fi
+        KB=$(du -sk "$ENTRY" | awk '{print $1}')
+        FOUND=$((FOUND + 1)); FOUND_KB=$((FOUND_KB + KB))
+        printf '%s\t%s\n' "$KB" "$ENTRY" >> /tmp/orphans
+        echo "ORPHAN: $ENTRY (${KB} KiB allocated, newest mtime epoch $NEWEST)"
+      done < /tmp/entries
+    done < /tmp/roots
+
+    echo "SUMMARY: ${FOUND} orphaned entr(ies), $((FOUND_KB / 1024)) MiB allocated."
+    if [ "$FOUND" -eq 0 ]; then echo "Nothing to do."; exit 0; fi
+
+    if [ "$FOUND" -gt "$MAX_ENTRIES" ] || [ "$FOUND_KB" -gt "$MAX_KB" ]; then
+      echo "FAIL: over the per-run cap ($MAX_ENTRIES entries / $MAX_KB KiB). Nothing deleted." >&2
+      echo "Deletes stay pinned in ZFS snapshots for up to 2 months, so a big one-shot sweep" >&2
+      echo "hurts a pool already at 88%. Review the list above, delete by hand, or raise the cap." >&2
+      exit 1
+    fi
+
+    if [ "$DRY_RUN" != "false" ]; then
+      echo "FAIL: DRY_RUN=$DRY_RUN — nothing deleted. Review the ORPHAN lines above, then set DRY_RUN to \"false\" in apps/servarr/downloads-janitor/cronjob.yaml." >&2
+      exit 1
+    fi
+
+    DELETED=0; DELETED_KB=0
+    while IFS="$(printf '\t')" read -r KB ENTRY; do
+      echo "DELETE: $ENTRY (${KB} KiB)"
+      rm -rf -- "$ENTRY" || { echo "FAIL: rm failed for $ENTRY" >&2; exit 1; }
+      DELETED=$((DELETED + 1)); DELETED_KB=$((DELETED_KB + KB))
+    done < /tmp/orphans
+    echo "SWEPT: $DELETED entr(ies), $((DELETED_KB / 1024)) MiB reclaimed (still pinned in ZFS snapshots for up to 2 months)."

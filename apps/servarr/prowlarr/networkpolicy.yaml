@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prowlarr-ingress-restricted
+  labels:
+    app: prowlarr
+spec:
+  podSelector:
+    matchLabels:
+      app: prowlarr
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [sonarr, radarr, gatus]
+      ports:
+        - protocol: TCP
+          port: 9696

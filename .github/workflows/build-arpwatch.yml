@@ -1,0 +1,115 @@
+---
+name: Build arpwatch image
+
+# Triggers removed for the public snapshot — this workflow is intentionally disabled.
+# See the private source repository for the active version.
+on:
+  workflow_dispatch:
+concurrency:
+  group: build-arpwatch-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# docker/buildx come from the runner's baseline (nix, git, docker); the tag
+# step shells out to curl and jq, which come from this repo's flake.nix
+# `scripts` devShell via the job-level default shell below.
+jobs:
+  build:
+    runs-on: [self-hosted, linux]
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: false
+    defaults:
+      run:
+        shell: nix --extra-experimental-features nix-command --extra-experimental-features flakes develop ${{ github.workspace }}#scripts --command bash -euo pipefail {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the LAN registry
+        uses: docker/login-action@v3
+        with:
+          registry: registry.home.bstjohn.net
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Generate tag
+        id: tag
+        env:
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          DATE=$(date -u +'%Y-%m-%d')
+          PREFIX="v${DATE}."
+          REPO="st-john-software/arpwatch"
+          OUT="${RUNNER_TEMP}/tags.json"
+
+          if [ -z "${REGISTRY_USER:-}" ] || [ -z "${REGISTRY_PASSWORD:-}" ]; then
+            echo "::error::REGISTRY_USER/REGISTRY_PASSWORD repo secrets are unset — see docs/registry.md 'Credential rotation'"
+            exit 1
+          fi
+
+          # zot serves the standard OCI distribution tags API; htpasswd auth
+          # means plain basic auth, no token dance. The credential reaches curl
+          # through a config file on stdin (`-K -`) rather than `curl -u`, so it
+          # is never in a process's argv where another job on this shared runner
+          # could read it from `ps` or /proc/<pid>/cmdline — and, unlike a netrc
+          # file, it never touches the runner's disk either. `printf` is a bash
+          # builtin, so the left side of the pipe forks nothing with an argv.
+          # `user = u:p` in a config file is exactly curl's -u option.
+          HTTP=$(printf 'user = %s:%s\n' "$REGISTRY_USER" "$REGISTRY_PASSWORD" \
+            | curl -sS -K - -o "$OUT" -w '%{http_code}' \
+              "https://registry.home.bstjohn.net/v2/${REPO}/tags/list?n=1000")
+
+          case "$HTTP" in
+            200)
+              TAGS=$(jq -r '.tags[]? // empty' "$OUT")
+              ;;
+            404)
+              echo "Repository ${REPO} not present in the registry yet — starting at .1"
+              TAGS=""
+              ;;
+            *)
+              echo "::error::Registry tags query failed with HTTP ${HTTP}"
+              cat "$OUT" || true
+              exit 1
+              ;;
+          esac
+
+          MAX=0
+          while IFS= read -r t; do
+            [ -z "$t" ] && continue
+            case "$t" in
+              "${PREFIX}"*)
+                N="${t#${PREFIX}}"
+                if [[ "$N" =~ ^[0-9]+$ ]] && [ "$N" -gt "$MAX" ]; then
+                  MAX="$N"
+                fi
+                ;;
+            esac
+          done <<< "$TAGS"
+
+          BUILD=$((MAX + 1))
+          TAG="v${DATE}.${BUILD}"
+          echo "Computed tag: ${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image: registry.home.bstjohn.net/${REPO}:${TAG}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build and push (LAN registry)
+        uses: docker/build-push-action@v6
+        with:
+          context: images/arpwatch
+          push: true
+          sbom: true
+          provenance: mode=max
+          tags: |
+            registry.home.bstjohn.net/st-john-software/arpwatch:${{ steps.tag.outputs.tag }}
+            registry.home.bstjohn.net/st-john-software/arpwatch:latest

@@ -1,0 +1,167 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forgejo-runner-ryzen
+  labels:
+    app: forgejo-runner-ryzen
+spec:
+  replicas: 1
+  # Two daemons sharing one registration UUID confuse Forgejo's runner
+  # bookkeeping, so never overlap old and new pods.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: forgejo-runner-ryzen
+  template:
+    metadata:
+      labels:
+        app: forgejo-runner-ryzen
+        component: forgejo-runner
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: low-priority
+      terminationGracePeriodSeconds: 60
+      # CI is the preemptible tenant here: Ollama and Whisper run at
+      # priorityClassName: standard (500000), this pod at low-priority (100000).
+      # Deliberately NOT a GPU pod: no runtimeClassName: nvidia and no
+      # nvidia.com/gpu request. The card's 2 time-sliced units are fully
+      # allocated to Ollama and Whisper — requesting one would leave this pod
+      # Pending forever, and the nvidia runtime buys a CI job nothing.
+      nodeSelector:
+        node-role.kubernetes.io/gpu: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: runner
+          image: code.forgejo.org/forgejo/runner:12.13.2
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              until nc -z localhost 2376; do
+                echo "waiting for the docker daemon..."
+                sleep 5
+              done
+              exec forgejo-runner --config /config/config.yml daemon \
+                --url "https://git.home.bstjohn.net/" \
+                --uuid "${RUNNER_UUID}" \
+                --token-url "file:/secret/token"
+          env:
+            - name: TZ
+              value: Europe/London
+            - name: DOCKER_HOST
+              value: tcp://localhost:2376
+            - name: DOCKER_CERT_PATH
+              value: /certs/client
+            - name: DOCKER_TLS_VERIFY
+              value: "1"
+            - name: RUNNER_UUID
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-runner-ryzen-secret
+                  key: uuid
+            # The job container image lives on the LAN registry
+            # (registry.home.bstjohn.net/st-john-software/forgejo-runner-nix),
+            # which requires auth for reads. act_runner pulls it itself and
+            # passes X-Registry-Auth to the dind daemon; it takes those
+            # credentials from docker's config.json, located via DOCKER_CONFIG.
+            # See act/container/docker/{pull,auth}.go in forgejo/runner v12.13.2.
+            - name: DOCKER_CONFIG
+              value: /docker-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+              ephemeral-storage: 4Gi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: secret
+              mountPath: /secret
+              readOnly: true
+            - name: docker-config
+              mountPath: /docker-config
+              readOnly: true
+            - name: docker-certs
+              mountPath: /certs
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+        - name: dind
+          image: docker.io/docker:29.6.2-dind
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: /certs
+          ports:
+            - containerPort: 2376
+              name: docker
+          # Privileged is unavoidable for Docker-in-Docker; this is why
+          # apps/forgejo-runner/deployment-ryzen.yaml is a kubesec exception in CI.
+          securityContext:
+            privileged: true
+          readinessProbe:
+            tcpSocket:
+              port: 2376
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 6000m
+              memory: 6Gi
+              ephemeral-storage: 40Gi
+          volumeMounts:
+            - name: docker-certs
+              mountPath: /certs
+            - name: docker-data
+              mountPath: /var/lib/docker
+      volumes:
+        - name: config
+          configMap:
+            name: forgejo-runner-beefy-config
+        - name: secret
+          secret:
+            secretName: forgejo-runner-ryzen-secret
+            defaultMode: 0444
+        # docker/cli only ever reads <DOCKER_CONFIG>/config.json, so the
+        # Secret's .dockerconfigjson key must be remapped — without items: the
+        # pull silently goes anonymous and fails with "pull access denied".
+        - name: docker-config
+          secret:
+            secretName: registry-pull
+            defaultMode: 0444
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+        - name: docker-certs
+          emptyDir: {}
+        - name: docker-data
+          emptyDir:
+            sizeLimit: 30Gi
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

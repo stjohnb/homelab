@@ -1,0 +1,122 @@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: containerd-gc
+spec:
+  schedule: "0 4 * * *"
+  timeZone: Europe/London
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 300
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: containerd-gc
+        spec:
+          hostPID: true
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          containers:
+            - name: containerd-gc
+              image: busybox:1.37
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -u
+                  # crictl lives in /usr/local/bin on Debian k3s and in
+                  # /run/current-system/sw/bin on NixOS k3s. nsenter inherits the
+                  # *container's* PATH into the host mount namespace, where neither
+                  # is guaranteed — so set PATH explicitly inside the host shell.
+                  HOST_PATH=/run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+                  host() {
+                    nsenter -t 1 -m -- /bin/sh -c "PATH=$HOST_PATH; export PATH; $*"
+                  }
+                  if ! host 'command -v crictl' >/dev/null 2>&1; then
+                    echo "[containerd-gc] ERROR: crictl not found on host under $HOST_PATH"
+                    exit 1
+                  fi
+                  host 'crictl rmi --prune'
+              resources:
+                requests:
+                  memory: 64Mi
+                  cpu: 100m
+                limits:
+                  memory: 256Mi
+                  cpu: 500m
+              securityContext:
+                privileged: true
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: containerd-gc-storage
+spec:
+  schedule: "30 4 * * *"
+  timeZone: Europe/London
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1800
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: containerd-gc
+        spec:
+          hostPID: true
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          nodeSelector:
+            node-role.kubernetes.io/storage: "true"
+          tolerations:
+            - key: node-role.kubernetes.io/storage
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+            - key: node.kubernetes.io/disk-pressure
+              operator: Exists
+              effect: NoSchedule
+          containers:
+            - name: containerd-gc
+              image: busybox:1.37
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -u
+                  # See containerd-gc above: nsenter carries the container's PATH into
+                  # the host mount namespace. k3s-nas runs NixOS, where crictl is at
+                  # /run/current-system/sw/bin/crictl and /usr/bin is essentially empty.
+                  HOST_PATH=/run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+                  host() {
+                    nsenter -t 1 -m -- /bin/sh -c "PATH=$HOST_PATH; export PATH; $*"
+                  }
+                  echo "[containerd-gc-storage] starting prune at $(date -Iseconds)"
+                  if ! host 'command -v crictl' >/dev/null 2>&1; then
+                    echo "[containerd-gc-storage] ERROR: crictl not found on host under $HOST_PATH"
+                    exit 1
+                  fi
+                  echo "[containerd-gc-storage] images before: $(host 'crictl images -q' | wc -l)"
+                  host 'crictl rmi --prune'
+                  rc=$?
+                  echo "[containerd-gc-storage] crictl rmi --prune exit code: $rc"
+                  echo "[containerd-gc-storage] images after: $(host 'crictl images -q' | wc -l)"
+                  echo "[containerd-gc-storage] finished at $(date -Iseconds)"
+                  exit $rc
+              resources:
+                requests:
+                  memory: 64Mi
+                  cpu: 100m
+                limits:
+                  memory: 256Mi
+                  cpu: 500m
+              securityContext:
+                privileged: true

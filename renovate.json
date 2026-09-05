@@ -1,0 +1,131 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "ignorePaths": [
+    "clusters/my-cluster/flux-system/gotk-components.yaml"
+  ],
+  "flux": {
+    "fileMatch": ["(clusters|apps)/.+\\.ya?ml$"]
+  },
+  "kubernetes": {
+    "fileMatch": ["apps/.+\\.ya?ml$"]
+  },
+  "rangeStrategy": "bump",
+  "dependencyDashboard": true,
+  "prConcurrentLimit": 3,
+  "prHourlyLimit": 2,
+  "minimumReleaseAge": "3 days",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "kubeconform version in CI workflow",
+      "fileMatch": ["\\.github/workflows/.+\\.yml$"],
+      "matchStrings": ["kubeconform/releases/download/v(?<currentValue>.+?)/kubeconform"],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "yannh/kubeconform",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "kubesec version in CI workflow",
+      "fileMatch": ["\\.github/workflows/.+\\.yml$"],
+      "matchStrings": ["kubesec/releases/download/v(?<currentValue>.+?)/kubesec"],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "controlplaneio/kubesec",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Trivy version in CI workflow",
+      "fileMatch": ["\\.github/workflows/.+\\.yml$"],
+      "matchStrings": ["TRIVY_VERSION=\"(?<currentValue>.+?)\""],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "aquasecurity/trivy",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "gitleaks version in CI workflow",
+      "fileMatch": ["\\.github/workflows/.+\\.yml$"],
+      "matchStrings": ["GITLEAKS_VERSION=\"(?<currentValue>.+?)\""],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "gitleaks/gitleaks",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Flux CRD schemas version",
+      "fileMatch": ["\\.github/workflows/.+\\.yml$", "Taskfile\\.ya?ml$"],
+      "matchStrings": ["fluxcd/flux2/releases/download/v(?<currentValue>.+?)/crd-schemas"],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "fluxcd/flux2",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Flux GitHub Action version",
+      "fileMatch": ["\\.github/workflows/.+\\.yml$"],
+      "matchStrings": ["uses: fluxcd/flux2/action@v(?<currentValue>.+?)\\s"],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "fluxcd/flux2",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Self-built images — bumped by build-arpwatch.yml / build-forgejo-runner-nix.yml / update-bin-scraper.yml / update-garden.yml / update-claws-staging.yml, not Renovate",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": [
+        "registry.home.bstjohn.net/st-john-software/arpwatch",
+        "ghcr.io/st-john-software/bin-scraper",
+        "registry.home.bstjohn.net/st-john-software/forgejo-runner-nix",
+        "registry.home.bstjohn.net/st-john-software/garden",
+        "ghcr.io/st-john-software/claws"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Label Helm chart dependency PRs",
+      "matchManagers": ["flux"],
+      "labels": ["dependencies", "helm"]
+    },
+    {
+      "description": "Add major-update label for major version bumps",
+      "matchManagers": ["flux"],
+      "matchUpdateTypes": ["major"],
+      "labels": ["dependencies", "helm", "major-update"]
+    },
+    {
+      "description": "Label CI tool dependency PRs",
+      "matchManagers": ["custom.regex"],
+      "labels": ["dependencies", "ci"]
+    },
+    {
+      "description": "Group LinuxServer.io servarr/media container images",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["/^linuxserver\\//"],
+      "excludePackageNames": ["linuxserver/wireguard"],
+      "groupName": "linuxserver-images"
+    },
+    {
+      "description": "Group Immich container images",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["/^ghcr\\.io\\/immich-app\\//"],
+      "groupName": "immich"
+    },
+    {
+      "description": "Group Authentik container images",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["/^ghcr\\.io\\/goauthentik\\//"],
+      "groupName": "authentik"
+    },
+    {
+      "description": "Group monitoring exporter images",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["prompve/prometheus-pve-exporter"],
+      "groupName": "monitoring"
+    }
+  ]
+}

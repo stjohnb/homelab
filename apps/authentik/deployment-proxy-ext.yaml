@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authentik-proxy-ext
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: authentik-proxy-ext
+  template:
+    metadata:
+      labels:
+        app: authentik-proxy-ext
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: critical-infrastructure
+      enableServiceLinks: false
+      containers:
+        - name: proxy
+          image: ghcr.io/goauthentik/proxy:2026.2.1
+          ports:
+            - containerPort: 9000
+              name: http
+            - containerPort: 9300
+              name: metrics
+          env:
+            - name: AUTHENTIK_HOST
+              value: http://authentik-server.default.svc.cluster.local:9000
+            - name: AUTHENTIK_HOST_BROWSER
+              value: https://auth.ext.bstjohn.net
+            - name: AUTHENTIK_INSECURE
+              value: "true"
+            - name: AUTHENTIK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: EXT_OUTPOST_TOKEN
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /outpost.goauthentik.io/ping
+              port: 9000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /outpost.goauthentik.io/ping
+              port: 9000
+            initialDelaySeconds: 10
+            periodSeconds: 10

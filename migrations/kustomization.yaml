@@ -1,0 +1,31 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - rbac.yaml
+  - job.yaml
+configMapGenerator:
+  - name: migration-runner-script
+    files:
+      - run-migrations.sh
+  - name: migration-scripts
+    files:
+      - 0001-authentik-secret-key.sh
+      - 0002-authentik-bootstrap-token.sh
+      - 0003-pg-pass.sh
+      - 0004-oidc-client-secrets.sh
+      - 0006-fix-transmission-pvc-access-mode.sh
+      - 0007-headlamp-token.sh
+      - 0011-headlamp-oidc-secret.sh
+      - 0012-headlamp-oidc-rekey.sh
+      - 0017-forgejo-runner-secret.sh
+      - 0019-forgejo-oidc-auth-source.sh
+      - 0020-bin-scraper-session-secret.sh
+      - 0021-registry-credentials.sh
+      - 0022-forgejo-runner-ryzen-secret.sh
+      - 0023-forgejo-runner-nas-secret.sh
+      - 0024-postgres-superuser.sh
+      - 0025-authentik-db.sh
+      - 0026-immich-db.sh
+      - 0027-immich-drop-pgvecto-rs.sh
+      - 0028-garden-db.sh
+      - 0029-garden-session-secret.sh

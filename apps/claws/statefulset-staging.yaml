@@ -1,0 +1,177 @@
+---
+# StatefulSet rather than Deployment: claws#2752's k8s runtime needs a
+# volumeClaimTemplate (the old standalone 1Gi PVC cannot be resized — the
+# local-path StorageClass has no allowVolumeExpansion) and a stable pod
+# identity for the 420s graceful shutdown. Only StatefulSet in this repo.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: claws-staging
+  namespace: default
+spec:
+  replicas: 1
+  serviceName: claws-staging
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: claws-staging
+  template:
+    metadata:
+      labels:
+        app: claws-staging
+    spec:
+      # local-path volumes are node-local and the other two nodes are powered
+      # off most of the day — pin to the control-plane node so a restart
+      # always finds its data.
+      nodeSelector:
+        kubernetes.io/hostname: k3s
+      serviceAccountName: claws-staging
+      # Needed (was false): the pod uses its own SA token to patch the
+      # `claws-auth` Secret when a provider credential rotates. It must use the
+      # projected token explicitly — the entrypoint writes ~/.kube/config from
+      # CLAWS_KUBECONFIG, and kubectl prefers that over in-cluster config.
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      priorityClassName: standard
+      # 300s scheduler drain + 5s task-cancel + 60s memory flush + headroom.
+      # Changing claws' shutdown() flush cap means changing this number.
+      terminationGracePeriodSeconds: 420
+      imagePullSecrets:
+        - name: ghcr-pull
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: claws
+          image: ghcr.io/st-john-software/claws:v2026-09-04.9
+          # Two Secrets by design: `claws-config` is long-lived static material
+          # (SOPS-appropriate); `claws-auth` holds only rotating provider
+          # credentials and is never committed in any form. Both optional so
+          # these manifests reconcile green before either exists.
+          # NOTE: the explicit env entries below WIN over envFrom — do not put
+          # CLAWS_ACTIVATION_STATE or any CLAWS_OIDC_* key in either Secret.
+          envFrom:
+            - secretRef:
+                name: claws-config
+                optional: true
+            - secretRef:
+                name: claws-auth
+                optional: true
+          env:
+            - name: CLAWS_ACTIVATION_STATE
+              value: verify-only
+            # Where the pod writes a rotated provider credential back to.
+            - name: CLAWS_AUTH_SECRET_NAME
+              value: claws-auth
+            - name: CLAWS_AUTH_SECRET_NAMESPACE
+              value: default
+            - name: CLAWS_OIDC_CLIENT_ID
+              value: claws
+            - name: CLAWS_OIDC_BASE_URL
+              value: https://auth.home.bstjohn.net
+            - name: CLAWS_OIDC_APPLICATION_SLUG
+              value: claws
+            - name: CLAWS_OIDC_REDIRECT_URI
+              value: https://claws-staging.home.bstjohn.net/auth/callback
+            # Per-request OIDC host routing (claws#2841/#2842). A login reaching
+            # the pod on claws-staging.ext.bstjohn.net must use the ext-facing
+            # Authentik host, not the internal-only auth.home one; claws matches
+            # the (port-stripped, lowercased) X-Forwarded-Host against this map
+            # and derives redirect_uri as https://<host>/auth/callback. The map
+            # is an allow-list — an unmapped or spoofed Host falls back to
+            # CLAWS_OIDC_BASE_URL/CLAWS_OIDC_REDIRECT_URI above, which is what
+            # prevents an open redirect, so only add hosts this pod really serves.
+            - name: CLAWS_OIDC_HOST_MAP
+              value: claws-staging.ext.bstjohn.net=https://auth.ext.bstjohn.net
+            - name: CLAWS_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: CLAWS_OIDC_CLIENT_SECRET
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: [ALL]
+          # No CPU limit: a throttled claude worker process stalls agent runs.
+          # The memory limit is a burst backstop, not a target.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              memory: 6Gi
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            failureThreshold: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /home/claws/.claws
+            - name: github-app-key
+              mountPath: /etc/claws/github-app
+              readOnly: true
+            - name: github-app-key-stjohnb
+              mountPath: /etc/claws/github-app-stjohnb
+              readOnly: true
+      volumes:
+        # St-John-Software GitHub App key (id 3408744), SOPS-encrypted in git as
+        # apps/claws/github-app.enc.yaml. Projected under the filename claws
+        # expects via CLAWS_GITHUB_APP_PRIVATE_KEY_PATH=/etc/claws/github-app/private-key.pem
+        # (set in claws-config) — the mount path is load-bearing, do not rename it.
+        # 0440 + fsGroup 1000 is readable by uid 1000. Not `optional`: the Secret
+        # ships in this same Kustomization, so a missing file means SOPS
+        # decryption broke, and ContainerCreating is a louder failure than a
+        # runtime ENOENT inside claws. This replaced the hand-seeded, not-in-git
+        # Secret `github-app-credentials` (key `privateKey`), which was never
+        # declared here so Flux SSA could not wipe it during the cutover.
+        - name: github-app-key
+          secret:
+            secretName: claws-github-app
+            defaultMode: 0440
+            items:
+              - key: private-key.pem
+                path: private-key.pem
+        # Second GitHub App (id 3408918), used for the `stjohnb` owner. Unlike
+        # the key above there is NO env var for it: claws reads it only from
+        # githubOwnerAppCredentials.stjohnb.privateKeyPath in ~/.claws/config.json
+        # on the PVC, which must name /etc/claws/github-app-stjohnb/private-key.pem
+        # (see docs/apps-overview.md). Separate Secret and separate directory
+        # deliberately: the two Apps rotate independently, and this path is what
+        # the k8s-cutover config.json rewrite names.
+        - name: github-app-key-stjohnb
+          secret:
+            secretName: claws-github-app-stjohnb
+            optional: true
+            defaultMode: 0440
+            items:
+              - key: private-key.pem
+                path: private-key.pem
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 50Gi

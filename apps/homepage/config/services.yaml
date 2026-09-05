@@ -1,0 +1,176 @@
+- Apps:
+    - Immich:
+        icon: immich.png
+        href: https://immich.home.bstjohn.net
+        siteMonitor: https://immich.home.bstjohn.net
+        description: Photo Management
+    - Mealie:
+        icon: mealie.png
+        href: https://mealie.home.bstjohn.net
+        siteMonitor: https://mealie.home.bstjohn.net
+        description: Recipe Manager
+    - Jellyfin:
+        icon: jellyfin.png
+        href: https://jellyfin.home.bstjohn.net
+        siteMonitor: https://jellyfin.home.bstjohn.net
+        description: Media Server (SSO)
+    - Music Assistant:
+        icon: music-assistant.png
+        href: https://music-assistant.home.bstjohn.net
+        siteMonitor: https://music-assistant.home.bstjohn.net
+        description: Cast Navidrome to speakers (SSO)
+    - Home Assistant:
+        icon: home-assistant.png
+        href: https://home-assistant.home.bstjohn.net
+        siteMonitor: https://home-assistant.home.bstjohn.net
+        description: Smart Home
+    - Garden:
+        icon: mdi-sprout
+        href: https://garden.home.bstjohn.net
+        siteMonitor: https://garden.home.bstjohn.net/api/health
+        description: Garden Planner
+
+- Home Automation:
+    - Awtrix (Kitchen):
+        icon: mdi-monitor
+        href: https://awtrix-kitchen.home.bstjohn.net/screen
+        siteMonitor: https://awtrix-kitchen.home.bstjohn.net/screen
+        description: LED Matrix — Kitchen
+    - Awtrix (Office):
+        icon: mdi-monitor
+        href: https://awtrix-office.home.bstjohn.net/screen
+        siteMonitor: https://awtrix-office.home.bstjohn.net/screen
+        description: LED Matrix — Office
+    - Bin Scraper:
+        icon: mdi-trash-can-outline
+        href: https://bin-scraper.home.bstjohn.net
+        siteMonitor: https://bin-scraper.home.bstjohn.net/version
+        description: Bin Collection
+
+- Servarr:
+    - Plex:
+        icon: plex.png
+        href: https://plex.home.bstjohn.net
+        siteMonitor: https://plex.home.bstjohn.net
+        description: Media Server
+    - Navidrome:
+        icon: navidrome.png
+        href: https://music.home.bstjohn.net
+        siteMonitor: https://music.home.bstjohn.net
+        description: Music Streaming (SSO)
+    - Overseerr:
+        icon: overseerr.png
+        href: https://overseerr.home.bstjohn.net
+        siteMonitor: https://overseerr.home.bstjohn.net
+        description: Request Management
+    - Jellyseerr:
+        icon: jellyseerr.png
+        href: https://jellyseerr.home.bstjohn.net
+        siteMonitor: https://jellyseerr.home.bstjohn.net
+        description: Request Management (SSO)
+    - Seerr:
+        icon: jellyseerr.png
+        href: https://seerr.home.bstjohn.net
+        siteMonitor: https://seerr.home.bstjohn.net
+        description: Request Management (SSO, preview)
+    - Sonarr:
+        icon: sonarr.png
+        href: https://sonarr.home.bstjohn.net
+        siteMonitor: https://sonarr.home.bstjohn.net
+        description: TV Shows
+    - Radarr:
+        icon: radarr.png
+        href: https://radarr.home.bstjohn.net
+        siteMonitor: https://radarr.home.bstjohn.net
+        description: Movies
+    - Prowlarr:
+        icon: prowlarr.png
+        href: https://prowlarr.home.bstjohn.net
+        siteMonitor: https://prowlarr.home.bstjohn.net
+        description: Indexer Manager
+    - Bazarr:
+        icon: bazarr.png
+        href: https://bazarr.home.bstjohn.net
+        siteMonitor: https://bazarr.home.bstjohn.net
+        description: Subtitle Manager
+    - Transmission:
+        icon: transmission.png
+        href: https://transmission.home.bstjohn.net
+        siteMonitor: https://transmission.home.bstjohn.net
+        description: Torrent Client
+
+- Infrastructure:
+    - Wake NAS:
+        icon: mdi-power-sleep
+        href: https://wake.home.bstjohn.net
+        siteMonitor: https://wake.home.bstjohn.net
+        description: Wake the NAS
+    - Shared dashboard:
+        icon: mdi-eye-outline
+        href: https://home.bstjohn.net/preview/limited
+        target: _self
+        siteMonitor: http://homepage-limited:3000/api/healthcheck
+        description: Preview what non-infra users see (#1095)
+    - Proxmox:
+        icon: si-proxmox
+        href: https://proxmox.home.bstjohn.net
+        siteMonitor: https://proxmox.home.bstjohn.net
+        description: Virtualization
+    - UniFi:
+        icon: unifi.png
+        href: https://unifi.home.bstjohn.net
+        siteMonitor: https://unifi.home.bstjohn.net
+        description: Network
+    - Grafana:
+        icon: grafana.png
+        href: https://grafana.home.bstjohn.net
+        siteMonitor: https://grafana.home.bstjohn.net
+        description: Dashboards
+    - Prometheus:
+        icon: prometheus.png
+        href: https://prometheus.home.bstjohn.net
+        siteMonitor: https://prometheus.home.bstjohn.net
+        description: Metrics
+    - Gatus:
+        icon: mdi-heart-pulse
+        href: https://gatus.home.bstjohn.net
+        siteMonitor: https://gatus.home.bstjohn.net
+        description: Uptime
+    - Authentik:
+        icon: authentik.png
+        href: https://auth.home.bstjohn.net
+        siteMonitor: https://auth.home.bstjohn.net
+        description: SSO
+    - Headlamp:
+        icon: mdi-kubernetes
+        href: https://dashboard.home.bstjohn.net
+        siteMonitor: https://dashboard.home.bstjohn.net
+        description: Kubernetes Dashboard
+    - Claws:
+        icon: mdi-cat
+        href: https://claws.home.bstjohn.net
+        siteMonitor: https://claws.home.bstjohn.net/status
+        description: Claws
+    # Containerized staging StatefulSet (apps/claws/statefulset-staging.yaml),
+    # distinct from the production Claws proxy above. Claws authenticates
+    # natively via Authentik OIDC, so /status is behind auth — the monitor
+    # targets the unauthenticated /health endpoint instead.
+    - Claws (staging):
+        icon: mdi-cat
+        href: https://claws-staging.home.bstjohn.net
+        siteMonitor: https://claws-staging.home.bstjohn.net/health
+        description: Claws (staging)
+    - Forgejo:
+        icon: forgejo.png
+        href: https://git.home.bstjohn.net
+        siteMonitor: https://git.home.bstjohn.net
+        description: Git Forge
+    - Registry:
+        icon: mdi-package-variant-closed
+        href: https://registry.home.bstjohn.net
+        # zot answers 405 to HEAD and 401 to an unauthenticated GET /v2/, so the
+        # monitor targets the mgmt extension endpoint, which zot serves
+        # anonymously with a real 200 (its own UI calls it to discover login
+        # methods). Homepage falls back from HEAD to GET on any status > 403.
+        siteMonitor: https://registry.home.bstjohn.net/v2/_zot/ext/mgmt
+        description: Container Registry (zot)

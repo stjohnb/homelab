@@ -1,0 +1,58 @@
+---
+name: Cleanup Actions storage
+
+# Triggers removed for the public snapshot — this workflow is intentionally disabled.
+# See the private source repository for the active version.
+on:
+  workflow_dispatch:
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: cleanup-actions-storage
+  cancel-in-progress: false
+
+# `gh` comes from this repo's flake.nix `scripts` devShell via the job-level
+# default shell — the self-hosted NixOS runners provide only nix/git/docker.
+# That needs the repo checked out first, which is why this job starts with a
+# checkout it didn't previously need.
+jobs:
+  cleanup:
+    runs-on: [self-hosted, linux]
+    defaults:
+      run:
+        shell: nix --extra-experimental-features nix-command --extra-experimental-features flakes develop ${{ github.workspace }}#scripts --command bash -euo pipefail {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Delete all Actions artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Deleting all Actions artifacts in ${{ github.repository }}..."
+          IDS=$(gh api --paginate \
+            "repos/${{ github.repository }}/actions/artifacts" \
+            --jq '.artifacts[].id')
+          if [ -z "$IDS" ]; then
+            echo "No artifacts to delete."
+          else
+            for id in $IDS; do
+              echo "Deleting artifact $id"
+              gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id" || true
+            done
+          fi
+
+      - name: Delete all Actions caches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Deleting all Actions caches in ${{ github.repository }}..."
+          gh cache delete --all --repo "${{ github.repository }}" 2>/dev/null \
+            || echo "No caches to delete."

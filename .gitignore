@@ -1,0 +1,12 @@
+# go-task cache directory
+.task/
+
+# Local kustomize secret env files (do not commit)
+/apps/bin-scraper/bin-scraper-mqtt.env
+
+# WireGuard configs with private keys (do not commit)
+/apps/servarr/wireguard-pod.conf
+/apps/servarr/transmission/secret-wireguard.yaml
+
+# MCP server config (contains auth tokens — do not commit)
+.mcp-claws.json

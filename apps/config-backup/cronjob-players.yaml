@@ -1,0 +1,107 @@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: config-backup-players
+  labels:
+    app: config-backup
+spec:
+  # 01:00, not 04:00. The NAS powers itself off at 03:03 Europe/London every
+  # night (nixos-config systemd.timers.nightly-shutdown) with no scheduled
+  # wake, and this Job's destination is the hard-mounted media-pvc. A 04:00
+  # run could never succeed. 01:00 leaves an hour of headroom before poweroff
+  # even if the Job burns its full 3600s deadline.
+  schedule: "0 1 * * *"
+  timeZone: Europe/London
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      # Plex's config is ~11G, so this run is slower than the servarr one.
+      activeDeadlineSeconds: 3600
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: config-backup
+        spec:
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          priorityClassName: low-priority
+          # No nodeSelector: every config PVC here (plex, jellyfin since #800,
+          # jellyseerr and seerr) is a local-path volume on k3s, and this Job
+          # has to follow them.
+          containers:
+            - name: config-backup
+              image: alpine:3.22
+              securityContext:
+                runAsUser: 0
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+                  # Root alone can't read Plex's 0600 files owned by uid 972
+                  # (Preferences.xml, .LocalAdminToken) once ALL is dropped, and
+                  # the script also needs to chown -wal/-shm back to the app and
+                  # chmod staged files it does not own. See docs/config-backups.md.
+                  add:
+                    - DAC_READ_SEARCH
+                    - DAC_OVERRIDE
+                    - CHOWN
+                    - FOWNER
+              command:
+                - /bin/sh
+                - /scripts/backup.sh
+              env:
+                # app:owner-uid:owner-gid — jellyfin and jellyseerr 2.7.3 run as
+                # root, plex as 972, and the seerr preview image as node (1000).
+                - name: APPS
+                  value: "plex:972:972 jellyfin:0:0 jellyseerr:0:0 seerr:1000:1000 navidrome:1000:1000"
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+                - name: plex-config
+                  mountPath: /config/plex
+                - name: jellyfin-config
+                  mountPath: /config/jellyfin
+                - name: jellyseerr-config
+                  mountPath: /config/jellyseerr
+                - name: seerr-config
+                  mountPath: /config/seerr
+                - name: navidrome-data
+                  mountPath: /config/navidrome
+                - name: media
+                  mountPath: /media
+              resources:
+                requests:
+                  memory: 128Mi
+                  cpu: 100m
+                limits:
+                  memory: 512Mi
+                  cpu: 1000m
+          volumes:
+            - name: script
+              configMap:
+                name: config-backup-script
+                defaultMode: 0555
+            - name: plex-config
+              persistentVolumeClaim:
+                claimName: plex-config
+            - name: jellyfin-config
+              persistentVolumeClaim:
+                claimName: jellyfin-config
+            - name: jellyseerr-config
+              persistentVolumeClaim:
+                claimName: jellyseerr-config
+            - name: seerr-config
+              persistentVolumeClaim:
+                claimName: seerr-config
+            - name: navidrome-data
+              persistentVolumeClaim:
+                claimName: navidrome-data-pvc
+            # The hard-mounted media-pvc, never media-soft-pvc — a backup that
+            # rides a soft mount can be silently truncated by an EIO.
+            - name: media
+              persistentVolumeClaim:
+                claimName: media-pvc

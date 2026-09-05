@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admission-error-reaper
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: admission-error-reaper
+  namespace: default
+rules:
+  # Rejected pod names carry a random ReplicaSet suffix, and RBAC cannot scope
+  # `list` with resourceNames at all — so these verbs are namespace-wide.
+  # `get` is belt-and-braces: `kubectl delete pod <name>` normally issues no GET,
+  # but a 403 there would be a silent runtime-only failure. Same trade-off as
+  # migrations/rbac.yaml's pods rule. Residual risk: this SA can delete any pod in
+  # `default`. Bounded by the container running one fixed, filtered command as UID
+  # 65534 with a read-only rootfs.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: admission-error-reaper
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: admission-error-reaper
+subjects:
+  - kind: ServiceAccount
+    name: admission-error-reaper
+    namespace: default

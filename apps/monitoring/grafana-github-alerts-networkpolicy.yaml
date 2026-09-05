@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: grafana-github-alerts-ingress-from-grafana-only
+  namespace: default
+  labels:
+    app: grafana-github-alerts
+spec:
+  podSelector:
+    matchLabels:
+      app: grafana-github-alerts
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+        # Gatus probes GET /healthz. POST /webhook is separately gated by the
+        # Bearer shared secret (is_authorized), which Gatus does not hold, so
+        # this does not let Gatus create or close GitHub issues.
+        - podSelector:
+            matchLabels:
+              app: gatus
+      ports:
+        - protocol: TCP
+          port: 8080

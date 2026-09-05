@@ -1,0 +1,36 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jellyseerr
+  labels:
+    app: jellyseerr
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik-traefik
+  tls:
+    - hosts:
+        - jellyseerr.home.bstjohn.net
+        - jellyseerr.ext.bstjohn.net
+      secretName: wildcard-home-tls
+  rules:
+    - host: jellyseerr.home.bstjohn.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: jellyseerr
+                port:
+                  number: 5055
+    - host: jellyseerr.ext.bstjohn.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: jellyseerr
+                port:
+                  number: 5055

@@ -1,0 +1,70 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: transmission-isolation
+  labels:
+    app: transmission
+spec:
+  podSelector:
+    matchLabels:
+      app: transmission
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Allow web UI access from Traefik, the truenas-gate nginx proxy that
+    # fronts transmission.home.bstjohn.net (ingress.yaml points at
+    # truenas-gate:80, NOT at this Service), and the *arr apps that manage
+    # downloads. Dropping truenas-gate here makes the ingress serve the
+    # "The NAS is asleep" wake page forever — see issue #771.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [sonarr, radarr, prowlarr, gatus, truenas-gate, downloads-janitor]
+      ports:
+        - port: 9091
+          protocol: TCP
+
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+    # Allow WireGuard connection to Mullvad (ie-dub)
+    - to:
+        - ipBlock:
+            cidr: 146.70.189.2/32
+      ports:
+        - port: 51820
+          protocol: UDP
+
+  # Allow all traffic through WireGuard tunnel (0.0.0.0/0 via wg0)
+  # This is handled by the pod's routing table, not NetworkPolicy
+  # NetworkPolicy sees the encrypted WireGuard traffic only
+
+  # Optional: Explicitly allow access to NFS server (NAS)
+  # Uncomment and adjust IP when NFS is configured
+  # - to:
+  #     - ipBlock:
+  #         cidr: 192.168.0.128/32  # NAS IP
+  #   ports:
+  #     - port: 2049
+  #       protocol: TCP
+  #     - port: 111
+  #       protocol: TCP
+  #     - port: 111
+  #       protocol: UDP

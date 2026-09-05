@@ -1,0 +1,38 @@
+# .trivyignore — Trivy CVE suppression list
+#
+# Governance policy (enforced by scripts/check-trivyignore.sh and CI):
+#   1. Every entry MUST include an exp:YYYY-MM-DD expiry date (typically 90 days).
+#   2. Every entry MUST have a comment block above it explaining why it's suppressed.
+#   3. Every comment block MUST include a link (https://) to the upstream issue.
+#
+# When a suppression nears expiry, re-evaluate:
+#   - If a fix is available: update the image/chart version and remove the entry.
+#   - If no fix yet: renew with a new expiry date and update the comment.
+#
+# Run locally: scripts/check-trivyignore.sh
+
+# OpenSSL high-severity vulnerability in Debian base of Authentik image
+# (ghcr.io/goauthentik/server:2026.2.1). No patched image available yet;
+# waiting for Debian to publish openssl 3.5.4-1~deb13u2 and Authentik to
+# rebuild their image from the updated base.
+# https://nvd.nist.gov/vuln/detail/CVE-2025-15467
+CVE-2025-15467 exp:2026-09-29
+
+# Go crypto/tls session resumption issue affecting the Go runtime bundled in
+# several images. Fixed in Go 1.24.13/1.25.7, but upstream images have not
+# yet published a rebuild based on the patched Go toolchain.
+# https://nvd.nist.gov/vuln/detail/CVE-2025-68121
+CVE-2025-68121 exp:2026-09-29
+
+# Go html/template vulnerabilities in the Redis Alpine image, which bundles
+# an older Go binary (v1.18). Fixed in Go 1.19.8+/1.20.3+, but the Redis
+# Docker image has not yet been rebuilt with a patched Go runtime.
+# https://nvd.nist.gov/vuln/detail/CVE-2023-24538
+# https://nvd.nist.gov/vuln/detail/CVE-2023-24540
+CVE-2023-24538 exp:2026-09-29
+CVE-2023-24540 exp:2026-09-29
+
+# Go net/netip issue in the Redis Alpine image (old Go v1.18 runtime).
+# Fixed in Go 1.21.11+/1.22.4+; waiting for the Redis image to be rebuilt.
+# https://nvd.nist.gov/vuln/detail/CVE-2024-24790
+CVE-2024-24790 exp:2026-09-29

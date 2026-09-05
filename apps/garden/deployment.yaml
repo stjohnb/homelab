@@ -1,0 +1,158 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: garden
+  labels:
+    app: garden
+spec:
+  replicas: 1
+  # Single ReadWriteOnce local-path photo volume — never run two pods against it.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: garden
+  template:
+    metadata:
+      labels:
+        app: garden
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: standard
+      # fsGroup only: the image runs as its own non-root user (node, uid 1000).
+      # fsGroup is added as a supplementary group, so the RWO photo volume is
+      # writable without pinning runAsUser here.
+      securityContext:
+        fsGroup: 1000
+      imagePullSecrets:
+        - name: registry-pull
+      # local-path volumes must stay on the 24/7 k3s node (same block as
+      # apps/registry/deployment.yaml).
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/gpu
+                    operator: DoesNotExist
+                  - key: node-role.kubernetes.io/storage
+                    operator: DoesNotExist
+      # Prisma schema is applied from the SAME image before the app starts, so a
+      # rollout never needs a manual `prisma migrate deploy`. It is idempotent
+      # and a no-op when the schema is already current.
+      initContainers:
+        - name: prisma-migrate
+          image: registry.home.bstjohn.net/st-john-software/garden:20260904-1339-737790f
+          imagePullPolicy: IfNotPresent
+          command: ["npx", "prisma", "migrate", "deploy"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: garden-db-secret
+                  key: DATABASE_URL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+      containers:
+        - name: garden
+          image: registry.home.bstjohn.net/st-john-software/garden:20260904-1339-737790f
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: TZ
+              value: Europe/London
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3000"
+            - name: HOSTNAME
+              value: "0.0.0.0"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: garden-db-secret
+                  key: DATABASE_URL
+            - name: PHOTO_STORAGE_DRIVER
+              value: local
+            - name: PHOTO_LOCAL_ROOT
+              value: /var/photos
+            # Authentik OIDC for the in-app auth gate (#1037). Env names are
+            # fixed by Garden's .env.example — do not rename them.
+            # OIDC_ISSUER needs its TRAILING SLASH: discovery is served from
+            # <issuer>/.well-known/openid-configuration.
+            - name: OIDC_ISSUER
+              value: https://auth.home.bstjohn.net/application/o/garden/
+            - name: OIDC_CLIENT_ID
+              value: garden
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: GARDEN_OIDC_CLIENT_SECRET
+            - name: OIDC_REDIRECT_URI
+              value: https://garden.home.bstjohn.net/auth/callback
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: garden-session
+                  key: session-secret
+            - name: SESSION_COOKIE_SECURE
+              value: "true"
+            # Deliberately empty: Garden requests only "openid profile email",
+            # so the ID token carries no `groups` claim. A non-empty list here
+            # would 403 every user. The Authentik policy binding (home +
+            # all-apps) is the real gate.
+            - name: OIDC_ALLOWED_GROUPS
+              value: ""
+            # Seed-packet OCR (/seeds/import). Ollama is a ClusterIP Service in
+            # this namespace on the GPU node — no ingress, no API key, nothing
+            # leaves the LAN. The model is preloaded by the model-preload
+            # container in apps/ollama/deployment.yaml.
+            - name: SEED_OCR_URL
+              value: http://ollama:11434
+            - name: SEED_OCR_MODEL
+              value: minicpm-v
+            - name: SEED_OCR_TIMEOUT_MS
+              value: "180000"
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          volumeMounts:
+            - name: photos
+              mountPath: /var/photos
+      volumes:
+        - name: photos
+          persistentVolumeClaim:
+            claimName: garden-photos

@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jellyseerr
+  labels:
+    app: jellyseerr
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: jellyseerr
+  template:
+    metadata:
+      labels:
+        app: jellyseerr
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: low-priority
+      enableServiceLinks: false
+      containers:
+        - name: jellyseerr
+          image: fallenbagel/jellyseerr:2.7.3
+          env:
+            - name: LOG_LEVEL
+              value: "info"
+            - name: TZ
+              value: "Europe/London"
+          ports:
+            - name: http
+              containerPort: 5055
+              protocol: TCP
+          volumeMounts:
+            - name: jellyseerr-config
+              mountPath: /app/config
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi
+              cpu: 1000m
+          # Probe /api/v1/status/appdata, NOT /api/v1/status: the latter calls
+          # api.github.com for the update check and blocks ~5s whenever
+          # external DNS is unavailable, which starved the 1s-default startup
+          # probe and CrashLoopBackOff'd a perfectly healthy app (#832).
+          livenessProbe:
+            httpGet:
+              path: /api/v1/status/appdata
+              port: 5055
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          startupProbe:
+            httpGet:
+              path: /api/v1/status/appdata
+              port: 5055
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /api/v1/status/appdata
+              port: 5055
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+      volumes:
+        - name: jellyseerr-config
+          persistentVolumeClaim:
+            claimName: jellyseerr-config
+
+      restartPolicy: Always

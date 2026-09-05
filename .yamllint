@@ -1,0 +1,20 @@
+---
+extends: default
+
+ignore:
+  - clusters/my-cluster/flux-system/gotk-components.yaml
+  - "*.enc.yaml"
+  - "**/*.enc.yaml"
+
+rules:
+  line-length:
+    max: 200
+  truthy: disable
+  comments:
+    require-starting-space: true
+  document-start: disable
+  indentation:
+    spaces: 2
+    indent-sequences: whatever
+  trailing-spaces: {}
+  new-line-at-end-of-file: {}

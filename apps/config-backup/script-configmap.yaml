@@ -1,0 +1,97 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config-backup-script
+  labels:
+    app: config-backup
+data:
+  backup.sh: |
+    set -eu
+
+    BACKUP_ROOT=/media/backups/config
+    RETAIN=14
+    STAMP="$(date +%Y%m%d-%H%M%S)"
+    FAILED=0
+
+    # Fail loudly if the NFS mount is absent — writing the "backup" into the pod's
+    # own filesystem would be silently useless.
+    grep -q " /media " /proc/mounts || { echo "ERROR: /media is not mounted"; exit 1; }
+
+    # Pinned so a mirror-side version bump can't silently change backup behavior;
+    # bump deliberately (Renovate does not track apk versions).
+    apk add --no-cache sqlite=3.49.2-r1 >/dev/null
+
+    # $APPS is a space-separated list of app:owner-uid:owner-gid triples supplied
+    # by the calling CronJob. Unquoted on purpose — word-splitting is the point.
+    for entry in $APPS; do
+      app="${entry%%:*}"; rest="${entry#*:}"; uid="${rest%%:*}"; gid="${rest#*:}"
+      src="/config/$app"; dest="$BACKUP_ROOT/$app"; stage="/tmp/stage/$app"
+
+      if [ ! -d "$src" ] || [ -z "$(ls -A "$src" 2>/dev/null)" ]; then
+        echo "WARN: $src missing or empty — skipping $app"
+        continue
+      fi
+
+      rm -rf "$stage"; mkdir -p "$stage" "$dest"
+
+      # Plex keeps ~11G of regenerable artwork, transcode cache and crash dumps
+      # under its config volume. Plug-in Support/ (Databases/, Preferences/) and
+      # Preferences.xml must NOT be excluded — they are the server's identity.
+      exfile="/tmp/ex-$app"; : > "$exfile"
+      if [ "$app" = plex ]; then
+        for d in Cache Metadata Media Logs "Crash Reports" Diagnostics Updates Codecs Scanners; do
+          echo "./Library/Application Support/Plex Media Server/$d" >> "$exfile"
+        done
+      fi
+
+      # 1. Copy everything except caches, logs, artwork and transient junk.
+      #    Backups/ and backup/ ARE kept — they are the apps' own restore points.
+      #    Staged via an intermediate file rather than a pipe so a read failure in
+      #    the first tar (e.g. a file vanishing mid-read) isn't masked by the second
+      #    tar exiting 0 on a truncated stream.
+      tar -cf "$stage.tar" -C "$src" -X "$exfile" \
+          --exclude='./logs' --exclude='./log' --exclude='./cache' \
+          --exclude='./Cache' --exclude='./MediaCover' --exclude='./transcodes' \
+          --exclude='./Sentry' --exclude='bandwidth-groups.json.tmp.*' \
+          --exclude='*.db-wal' --exclude='*.db-shm' \
+          --exclude='*.sqlite3-wal' --exclude='*.sqlite3-shm' --exclude='*.pid' \
+          .
+      tar -xf "$stage.tar" -C "$stage"
+      rm -f "$stage.tar"
+
+      # 2. Consistent hot copies of every SQLite DB via the online backup API.
+      #    A plain tar of a live WAL database can be torn; .backup cannot.
+      #    maxdepth 6 reaches Plex's Plug-in Support/Databases/*.db.
+      #    Read via a temp file, not `for db in $(find ...)`: Plex's paths
+      #    contain spaces ("Application Support"), which word-splitting would
+      #    shred. A `find | while read` pipeline would instead put the loop in a
+      #    subshell and lose the ok=0 assignment.
+      ok=1
+      dblist="/tmp/dbs-$app"
+      find "$src" -maxdepth 6 -type f \( -name '*.db' -o -name '*.sqlite3' \) > "$dblist"
+      while IFS= read -r db; do
+        rel="${db#"$src"/}"
+        mkdir -p "$stage/$(dirname "$rel")"
+        if ! sqlite3 -cmd ".timeout 10000" "$db" ".backup '$stage/$rel'"; then
+          echo "ERROR: sqlite backup failed for $db"
+          ok=0
+        fi
+      done < "$dblist"
+      rm -f "$dblist"
+
+      # 3. sqlite3 ran as root and may have recreated -wal/-shm owned by root;
+      #    hand them back so the app can still write after a restart.
+      find "$src" \( -name '*-wal' -o -name '*-shm' \) -exec chown "$uid:$gid" {} +
+
+      if [ "$ok" -ne 1 ]; then FAILED=1; rm -rf "$stage"; continue; fi
+
+      out="$dest/$app-config-$STAMP.tar.gz"
+      tar -czf "$out" -C "$stage" .
+      echo "Wrote $out ($(du -h "$out" | cut -f1))"
+      rm -rf "$stage"
+
+      ( cd "$dest" && ls -t ./*.tar.gz 2>/dev/null | tail -n "+$((RETAIN + 1))" | xargs -r rm -v )
+    done
+
+    exit "$FAILED"

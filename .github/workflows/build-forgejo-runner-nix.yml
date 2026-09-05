@@ -1,0 +1,53 @@
+---
+name: Build forgejo-runner-nix image
+
+# Triggers removed for the public snapshot — this workflow is intentionally disabled.
+# See the private source repository for the active version.
+on:
+  workflow_dispatch:
+concurrency:
+  group: build-forgejo-runner-nix-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# No flake tools are needed here: docker/buildx come from the runner baseline
+# and the tag is computed with shell built-ins.
+jobs:
+  build:
+    runs-on: [self-hosted, linux]
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the LAN registry
+        uses: docker/login-action@v3
+        with:
+          registry: registry.home.bstjohn.net
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Generate tag
+        id: tag
+        run: |
+          set -euo pipefail
+          TAG="$(date -u +'%Y%m%d-%H%M')-${GITHUB_SHA:0:7}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image: registry.home.bstjohn.net/st-john-software/forgejo-runner-nix:${TAG}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build and push (LAN registry)
+        uses: docker/build-push-action@v6
+        with:
+          context: images/forgejo-runner-nix
+          push: true
+          sbom: true
+          provenance: mode=max
+          tags: |
+            registry.home.bstjohn.net/st-john-software/forgejo-runner-nix:${{ steps.tag.outputs.tag }}
+            registry.home.bstjohn.net/st-john-software/forgejo-runner-nix:latest

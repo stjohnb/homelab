@@ -1,0 +1,34 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: authentik
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik-traefik
+  tls:
+    - hosts:
+        - auth.home.bstjohn.net
+        - auth.ext.bstjohn.net
+      secretName: wildcard-home-tls
+  rules:
+    - host: auth.home.bstjohn.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: authentik-server
+                port:
+                  number: 9000
+    - host: auth.ext.bstjohn.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: authentik-server
+                port:
+                  number: 9000

@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: seerr
+  labels:
+    app: seerr
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: seerr
+  template:
+    metadata:
+      labels:
+        app: seerr
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: low-priority
+      enableServiceLinks: false
+      initContainers:
+        - name: oidc-init
+          image: python:3.13.3-alpine3.21
+          command: ["python3", "/scripts/oidc-init.py"]
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            # optional: true is load-bearing - a missing Secret would otherwise
+            # put the pod into CreateContainerConfigError. With it the script
+            # logs, skips the OIDC merge, still chowns, and Seerr serves.
+            - name: SEERR_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: SEERR_OIDC_CLIENT_SECRET
+                  optional: true
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "DAC_READ_SEARCH"]
+          volumeMounts:
+            - name: seerr-config
+              mountPath: /app/config
+            - name: oidc-init-script
+              mountPath: /scripts
+              readOnly: true
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 10m
+            limits:
+              memory: 96Mi
+              cpu: 200m
+      containers:
+        - name: seerr
+          # Seerr preview build carrying the OIDC implementation from upstream
+          # PR seerr-team/seerr#2715 - still OPEN, not in any stable release.
+          # Pinned by digest because `preview-new-oidc` is a MUTABLE tag that
+          # upstream force-pushes; Renovate cannot track it, so bumps are
+          # manual. Before bumping read
+          # https://github.com/seerr-team/seerr/discussions/2721 - this tag has
+          # broken login outright before. Jellyseerr 2.7.3 stays deployed at
+          # jellyseerr.home.bstjohn.net as the fallback (#820).
+          image: ghcr.io/seerr-team/seerr:preview-new-oidc@sha256:6a2a160b878b98d079c8ee6933f58997bb26d68dbcbc789c1a559bc6955db60d
+          env:
+            - name: LOG_LEVEL
+              value: "info"
+            - name: TZ
+              value: "Europe/London"
+          ports:
+            - name: http
+              containerPort: 5055
+              protocol: TCP
+          volumeMounts:
+            - name: seerr-config
+              mountPath: /app/config
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi
+              cpu: 1000m
+          # Probe /api/v1/status/appdata, NOT /api/v1/status: the latter calls
+          # api.github.com for the update check and blocks ~5s whenever
+          # external DNS is unavailable, which starved the 1s-default startup
+          # probe and CrashLoopBackOff'd a perfectly healthy app (#832).
+          livenessProbe:
+            httpGet:
+              path: /api/v1/status/appdata
+              port: 5055
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          startupProbe:
+            httpGet:
+              path: /api/v1/status/appdata
+              port: 5055
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /api/v1/status/appdata
+              port: 5055
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+      volumes:
+        - name: seerr-config
+          persistentVolumeClaim:
+            claimName: seerr-config
+        - name: oidc-init-script
+          configMap:
+            name: seerr-oidc-init-script
+            defaultMode: 0555
+
+      restartPolicy: Always

@@ -1,0 +1,105 @@
+# Shared PostgreSQL instance for Authentik, Immich and Garden — see docs/postgres.md.
+#
+# Per-app roles and databases are created ONLY by the numbered migration scripts
+# (`migrations/00NN-*-db*.sh`) via `kubectl exec` into this pod. Never add an
+# init script under /docker-entrypoint-initdb.d: that directory runs on first
+# initialisation of an empty data directory only, so any app onboarded after
+# this volume was created would be silently skipped.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  # Single ReadWriteOnce local-path volume — never run two pods against it.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: critical-infrastructure
+      terminationGracePeriodSeconds: 90
+      # Keep postgres off the GPU node (ryzen) and the NAS node (k3s-nas).
+      # Both carry NoSchedule taints this pod does not tolerate; the affinity is
+      # belt-and-braces in case a taint is ever removed. The local-path volume
+      # must stay on the 24/7 k3s node.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/gpu
+                    operator: DoesNotExist
+                  - key: node-role.kubernetes.io/storage
+                    operator: DoesNotExist
+      containers:
+        # No `command:` override. The image ships
+        # /usr/local/bin/immich-docker-entrypoint.sh, which writes its own
+        # postgresql.conf and preloads vchord.so — replacing the entrypoint
+        # silently drops the vector extension Immich needs.
+        #
+        # The legacy pgvecto.rs (`vectors`) layer was dropped once
+        # migrations/0027-immich-drop-pgvecto-rs.sh completed. vectors.so is no
+        # longer preloaded, so NEVER roll Immich back below v1.133 after this:
+        # older releases write `vectors`-typed objects this image cannot open.
+        - name: postgres
+          image: ghcr.io/immich-app/postgres:16-vectorchord0.4.3@sha256:2c6e74ea2c5d4d784f5eece3d25c8d1c8872623537eb048483a913fcfb3587cc
+          ports:
+            - containerPort: 5432
+          env:
+            - name: TZ
+              value: Europe/London
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_DB
+              value: postgres
+            - name: POSTGRES_INITDB_ARGS
+              value: --data-checksums
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-superuser
+                  key: POSTGRES_PASSWORD
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          # pg_isready, not tcpSocket: the postmaster accepts connections while
+          # still replaying WAL after an unclean shutdown.
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: postgres-data

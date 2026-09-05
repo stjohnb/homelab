@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pve-exporter
+  namespace: default
+  labels:
+    app: pve-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pve-exporter
+  template:
+    metadata:
+      labels:
+        app: pve-exporter
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: low-priority
+      enableServiceLinks: false
+      containers:
+        - name: pve-exporter
+          image: prompve/prometheus-pve-exporter:3.8.1
+          ports:
+            - containerPort: 9221
+          env:
+            - name: PVE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: pve-exporter-secret
+                  key: pve-user
+            - name: PVE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pve-exporter-secret
+                  key: pve-password
+            - name: PVE_VERIFY_SSL
+              value: "false"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 9221
+            periodSeconds: 15
+          startupProbe:
+            httpGet:
+              path: /
+              port: 9221
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 9221
+            periodSeconds: 10

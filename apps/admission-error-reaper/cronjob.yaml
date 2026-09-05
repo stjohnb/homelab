@@ -1,0 +1,73 @@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: admission-error-reaper
+  labels:
+    app: admission-error-reaper
+spec:
+  schedule: "*/5 * * * *"
+  timeZone: Europe/London
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 600
+      template:
+        metadata:
+          labels:
+            app: admission-error-reaper
+        spec:
+          serviceAccountName: admission-error-reaper
+          restartPolicy: Never
+          enableServiceLinks: false
+          priorityClassName: low-priority
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: reaper
+              image: alpine/k8s:1.33.3
+              env:
+                - name: HOME
+                  value: /tmp
+                - name: KUBECACHEDIR
+                  value: /tmp/kubecache
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  names=$(kubectl get pods -n default \
+                    --field-selector status.phase=Failed \
+                    -o jsonpath='{range .items[?(@.status.reason=="UnexpectedAdmissionError")]}{.metadata.name}{" "}{end}')
+                  if [ -z "$names" ]; then
+                    echo "[admission-error-reaper] nothing to reap"
+                    exit 0
+                  fi
+                  echo "[admission-error-reaper] deleting: $names"
+                  kubectl delete pod -n default $names || true
+                  exit 0
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}

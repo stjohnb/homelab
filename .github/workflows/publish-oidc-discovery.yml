@@ -1,0 +1,48 @@
+---
+name: Publish OIDC discovery documents
+
+# Triggers removed for the public snapshot — this workflow is intentionally disabled.
+# See the private source repository for the active version.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+
+# `aws` comes from this repo's flake.nix `scripts` devShell — the self-hosted
+# NixOS runners provide only nix/git/docker.
+env:
+  NIX_FLAGS: --extra-experimental-features nix-command --extra-experimental-features flakes
+
+jobs:
+  publish:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+
+      # `aws s3 cp` per file, not `sync`: sync sets binary/octet-stream on these
+      # extensionless keys, and the short max-age avoids needing a CloudFront
+      # invalidation (the publish role has no invalidation permission).
+      - name: Upload discovery document
+        run: >
+          nix $NIX_FLAGS develop .#scripts --command
+          aws s3 cp oidc/.well-known/openid-configuration
+          s3://www.bstjohn.net/k3s-oidc/.well-known/openid-configuration
+          --content-type application/json --cache-control max-age=60
+
+      - name: Upload JWKS
+        run: >
+          nix $NIX_FLAGS develop .#scripts --command
+          aws s3 cp oidc/openid/v1/jwks
+          s3://www.bstjohn.net/k3s-oidc/openid/v1/jwks
+          --content-type application/json --cache-control max-age=60

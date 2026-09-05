@@ -1,0 +1,146 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: migration-runner
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: migration-runner
+  namespace: default
+rules:
+  # State tracking via ConfigMap.
+  # Note: K8s RBAC does not support resourceNames restriction on `create` verbs
+  # because the resource doesn't exist yet at admission time — so `create` must
+  # be granted without resourceNames (namespace-wide).
+  # Residual risk: this SA can create arbitrary ConfigMaps in the default namespace.
+  # Acceptable for a short-lived migration runner Job; do not grant to long-running workloads.
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [migration-state]
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [create]
+  # Secret management (create if missing, read and patch keys).
+  # Note: K8s RBAC does not support resourceNames restriction on `create` verbs
+  # because the resource doesn't exist yet at admission time — so `create` must
+  # be granted without resourceNames (namespace-wide).
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [authentik-secrets, headlamp-oidc]
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [headlamp-token]
+    verbs: [get]
+  # Existence check only (0014, 0017, 0020, 0021, 0022, 0023, 0024, 0026, 0028, 0029) —
+  # these scripts always create fresh, never patch. The `get` grant is load-bearing:
+  # without it the guard `kubectl get secret X >/dev/null 2>&1` gets Forbidden,
+  # not NotFound, and can never report "already exists" (#923).
+  # 0026 is the exception: it never creates `immich-db-secret`, it reads the
+  # existing value to copy the Immich database into the shared postgres instance.
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames:
+      - forgejo-runner-secret
+      - forgejo-runner-ryzen-secret
+      - forgejo-runner-nas-secret
+      - vaultwarden-admin
+      - bin-scraper-session
+      - registry-auth
+      - registry-pull
+      - postgres-superuser
+      - immich-db-secret
+      - garden-db-secret
+      - garden-session
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+  # Read headlamp ServiceAccount to verify it exists before creating the token secret (0007)
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    resourceNames: [headlamp]
+    verbs: [get]
+  # Exec into the forgejo pod to run `forgejo-cli actions register` (0017). Pod names are
+  # assigned by the Deployment's ReplicaSet and change across rollouts, so resourceNames
+  # cannot scope this to the forgejo pod specifically — same limitation as deployments/scale
+  # below. Residual risk: this SA can exec into any pod in `default`, a materially larger
+  # blast radius than the other rules here. Accepted because forgejo-cli needs direct access
+  # to the running server process (it writes straight to Forgejo's DB) and Forgejo has no
+  # API-token bootstrap mechanism that would let us avoid exec entirely.
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+  # PVC delete for transmission access mode migration (0006)
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    resourceNames: [transmission-downloads-pvc]
+    verbs: [get, delete, list, watch]
+  # Scale deployment and wait for pods (0006). `watch` is required by
+  # `kubectl rollout status` (0019), which defaults to --watch=true.
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [transmission, headlamp, forgejo]
+    verbs: [get, patch, watch]
+  # Scale subresource for deployments (0006) — kubectl scale uses patch or update
+  # depending on the k8s client version.
+  # NOTE: resourceNames is intentionally omitted here (unlike the deployments rule above
+  # which is scoped to [transmission]). k3s does not reliably evaluate resourceNames for
+  # subresource authorization requests, so the restriction is silently ignored, causing
+  # permission denied errors at runtime. This is a known k3s limitation and the trade-off
+  # is accepted: the migration-runner SA can scale any deployment in the default namespace,
+  # not just transmission. This asymmetry with the parent deployments rule is deliberate.
+  # Risk is bounded: migration-runner runs as a short-lived Job in a controlled namespace.
+  - apiGroups: [apps]
+    resources: [deployments/scale]
+    verbs: [get, patch, update]
+  # `get` is required in addition to `list`/`watch`: `kubectl exec` (0017) issues a GET on the
+  # named pod to resolve the default container before opening the exec stream, so a grant of
+  # pods/exec alone returns 403 at the GET. Same failure shape as `kubectl apply` needing `get`
+  # on the target Secret. resourceNames cannot scope this — Deployment pod names change across
+  # rollouts — so the SA can read any pod spec in `default`. Accepted: pod specs expose secret
+  # *names*, never values, and this is a short-lived Job.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: migration-runner
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: migration-runner
+subjects:
+  - kind: ServiceAccount
+    name: migration-runner
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: migration-runner-pv
+rules:
+  # PV delete for transmission access mode migration (0006)
+  - apiGroups: [""]
+    resources: [persistentvolumes]
+    resourceNames: [transmission-downloads-nfs-pv]
+    verbs: [get, delete, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: migration-runner-pv
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: migration-runner-pv
+subjects:
+  - kind: ServiceAccount
+    name: migration-runner
+    namespace: default

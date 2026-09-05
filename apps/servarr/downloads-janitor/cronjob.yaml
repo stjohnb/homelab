@@ -1,0 +1,94 @@
+---
+# Mounts ssdpool-pvc once at /data with no subPath, matching the rule
+# documented in apps/servarr/shared-pvcs.yaml: the janitor must see the same
+# st_dev/vfsmount as Sonarr and Radarr for its nlink test to mean anything.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: downloads-janitor
+  labels:
+    app: downloads-janitor
+spec:
+  schedule: "30 1 * * *"
+  timeZone: Europe/London
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 900
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app: downloads-janitor
+            claws.st-john-software.com/nfs-dependent: "true"
+        spec:
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          restartPolicy: Never
+          priorityClassName: low-priority
+          nodeSelector:
+            node-role.kubernetes.io/storage: "true"
+          tolerations:
+            - key: node-role.kubernetes.io/storage
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          containers:
+            - name: janitor
+              image: curlimages/curl:8.21.0
+              command: ["/bin/sh", "/scripts/janitor.sh"]
+              env:
+                - name: AGE_DAYS
+                  value: "14"
+                - name: RPC_WAIT_SECS
+                  # Bounded wait for the Transmission RPC handshake. A fresh
+                  # job pod is REJECTed for the first few seconds until
+                  # kube-router programs its IP into the transmission-isolation
+                  # NetworkPolicy ipset (#1084).
+                  value: "120"
+                - name: MAX_ENTRIES
+                  value: "5"
+                - name: MAX_KB
+                  value: "104857600"
+                - name: DRY_RUN
+                  # Flipped to "false" in #1121 after the first report was read
+                  # (2 stale entries under incomplete/, 512 MiB, last touched
+                  # 2026-03-11). Set back to "true" to re-arm report-only mode.
+                  value: "false"
+              securityContext:
+                runAsUser: 1000
+                runAsGroup: 1000
+                runAsNonRoot: true
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                seccompProfile:
+                  type: RuntimeDefault
+              resources:
+                requests:
+                  memory: 32Mi
+                  cpu: 10m
+                limits:
+                  memory: 256Mi
+                  cpu: 500m
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: ssdpool
+                  mountPath: /data
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: scripts
+              configMap:
+                name: downloads-janitor-script
+                defaultMode: 0555
+            - name: ssdpool
+              persistentVolumeClaim:
+                claimName: ssdpool-pvc
+            - name: tmp
+              emptyDir: {}

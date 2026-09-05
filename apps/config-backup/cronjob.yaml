@@ -1,0 +1,106 @@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: config-backup
+  labels:
+    app: config-backup
+spec:
+  # 02:00, not 03:30. The NAS powers itself off at 03:03 Europe/London every
+  # night (nixos-config systemd.timers.nightly-shutdown) with no scheduled
+  # wake, and this Job's destination is the hard-mounted media-pvc. A 03:30
+  # run could never succeed. 02:00 + the 1800s deadline finishes by 02:30 at
+  # the latest, clear of poweroff and of forgejo-backup-offsite at 03:00.
+  schedule: "0 2 * * *"
+  timeZone: Europe/London
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1800
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: config-backup
+        spec:
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          priorityClassName: low-priority
+          nodeSelector:
+            node-role.kubernetes.io/storage: "true"
+          tolerations:
+            - key: node-role.kubernetes.io/storage
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          containers:
+            - name: config-backup
+              image: alpine:3.22
+              securityContext:
+                runAsUser: 0
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+                  # Same posture as config-backup-players (see
+                  # docs/config-backups.md): the servarr configs happen to be
+                  # group/world-readable today, but the chown on -wal/-shm and
+                  # the sqlite3 WAL -shm write have the same latent
+                  # requirement, and both Jobs share one script.
+                  add:
+                    - DAC_READ_SEARCH
+                    - DAC_OVERRIDE
+                    - CHOWN
+                    - FOWNER
+              command:
+                - /bin/sh
+                - /scripts/backup.sh
+              env:
+                # app:owner-uid:owner-gid — the linuxserver apps all run as
+                # 1000:1000. Plex and Jellyfin are covered by
+                # config-backup-players: their config PVCs are local-path
+                # volumes on k3s, and this Job stays pinned to k3s-nas (#800).
+                - name: APPS
+                  value: "sonarr:1000:1000 radarr:1000:1000 bazarr:1000:1000 transmission:1000:1000"
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+                - name: sonarr-config
+                  mountPath: /config/sonarr
+                - name: radarr-config
+                  mountPath: /config/radarr
+                - name: bazarr-config
+                  mountPath: /config/bazarr
+                - name: transmission-config
+                  mountPath: /config/transmission
+                - name: media
+                  mountPath: /media
+              resources:
+                requests:
+                  memory: 128Mi
+                  cpu: 100m
+                limits:
+                  memory: 512Mi
+                  cpu: 1000m
+          volumes:
+            - name: script
+              configMap:
+                name: config-backup-script
+                defaultMode: 0555
+            - name: sonarr-config
+              persistentVolumeClaim:
+                claimName: sonarr-local-config-pvc
+            - name: radarr-config
+              persistentVolumeClaim:
+                claimName: radarr-local-config-pvc
+            - name: bazarr-config
+              persistentVolumeClaim:
+                claimName: bazarr-local-config-pvc
+            - name: transmission-config
+              persistentVolumeClaim:
+                claimName: transmission-local-config-pvc
+            - name: media
+              persistentVolumeClaim:
+                claimName: media-pvc

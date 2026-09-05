@@ -1,0 +1,150 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jellyfin
+  labels:
+    app: jellyfin
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: jellyfin
+  template:
+    metadata:
+      labels:
+        app: jellyfin
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: low-priority
+      enableServiceLinks: false
+      # Jellyfin's server name (shown in every client, DLNA renderer and UDP
+      # auto-discovery reply) falls back to the container hostname because
+      # ServerName is unset in system.xml. Without this the name is the pod
+      # name and changes on every rollout (#812). It cannot be the FQDN:
+      # spec.hostname must be a single RFC 1123 label ("must not contain
+      # dots"). The FQDN lives in JELLYFIN_PublishedServerUrl below.
+      hostname: jellyfin
+      # Unpinned from k3s-nas (#800): Jellyfin only reads media, over NFS
+      # either way.
+      containers:
+        - name: jellyfin
+          image: jellyfin/jellyfin:10.10.7
+          env:
+            - name: TZ
+              value: "Europe/London"
+            - name: JELLYFIN_PublishedServerUrl
+              value: "https://jellyfin.home.bstjohn.net"
+          ports:
+            - name: http
+              containerPort: 8096
+              protocol: TCP
+          volumeMounts:
+            - name: jellyfin-config
+              mountPath: /config
+            - name: jellyfin-cache
+              mountPath: /cache
+            - name: media
+              mountPath: /media
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 200m
+            limits:
+              memory: 4Gi
+              cpu: 2000m
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8096
+            periodSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8096
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8096
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+        # Self-heal sidecar (#807). The docs/nas-app-tier-migration.md step 7
+        # settings that stop the library scanner deleting entries while the NAS
+        # sleeps live in Jellyfin's database, which is NOT GitOps-managed — a
+        # reinstall or settings reset loses them silently. This reconciles them
+        # from the API on every pod start and every 5 minutes thereafter. It
+        # only POSTs when a value differs, so it is a no-op in steady state.
+        # It also owns the library-scan cadence (#1075), gated on the NAS
+        # being reachable and /media/Movies and /media/TV being non-empty.
+        - name: config-reconciler
+          image: python:3.13.3-alpine3.21
+          command: ["python3", "/app/reconcile.py"]
+          ports:
+            - name: metrics
+              containerPort: 9101
+              protocol: TCP
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            # optional: true is load-bearing — without it a missing Secret puts
+            # the whole Jellyfin pod into CreateContainerConfigError. With it,
+            # the reconciler logs and idles while Jellyfin serves normally.
+            - name: JELLYFIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jellyfin-api-key
+                  key: api-key
+                  optional: true
+            # Same optional: true rationale as JELLYFIN_API_KEY above. When it
+            # is empty the SSO plugin reconcile is skipped, not wiped.
+            - name: JELLYFIN_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: JELLYFIN_OIDC_CLIENT_SECRET
+                  optional: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: reconciler-script
+              mountPath: /app
+              readOnly: true
+            - name: media
+              mountPath: /media
+              readOnly: true
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 10m
+            limits:
+              memory: 96Mi
+              cpu: 200m
+
+      volumes:
+        - name: jellyfin-config
+          persistentVolumeClaim:
+            claimName: jellyfin-config
+        - name: jellyfin-cache
+          emptyDir: {}
+        - name: media
+          persistentVolumeClaim:
+            claimName: media-soft-pvc
+        - name: reconciler-script
+          configMap:
+            name: jellyfin-reconciler-script
+            defaultMode: 0555
+
+      restartPolicy: Always

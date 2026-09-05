@@ -1,0 +1,87 @@
+---
+name: Renovate
+
+# Triggers removed for the public snapshot — this workflow is intentionally disabled.
+# See the private source repository for the active version.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+env:
+  NIX_FLAGS: --extra-experimental-features nix-command --extra-experimental-features flakes
+
+jobs:
+  renovate:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      # Renovate's initRepo issues one GraphQL repoInfoQuery and aborts with a
+      # bare "platform-unknown-error" if ANY field in it returns a permission
+      # error (run 33397121047: the token lacked Issues and Dependabot alerts,
+      # so `issues` and hasVulnerabilityAlertsEnabled errored). Replay that
+      # query here so the failure names the missing permissions instead.
+      - name: Preflight — RENOVATE_TOKEN present and correctly scoped
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RENOVATE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::RENOVATE_TOKEN is missing or empty." \
+              "Recreate the dedicated fine-grained PAT — see docs/infrastructure-overview.md."
+            exit 1
+          fi
+          if ! out="$(nix $NIX_FLAGS develop .#scripts --command gh api graphql -f query='
+            query {
+              repository(owner: "St-John-Software", name: "fleet-infra") {
+                id
+                isFork
+                isArchived
+                nameWithOwner
+                hasIssuesEnabled
+                hasVulnerabilityAlertsEnabled
+                autoMergeAllowed
+                mergeCommitAllowed
+                rebaseMergeAllowed
+                squashMergeAllowed
+                defaultBranchRef { name target { oid } }
+                issues(orderBy: {field: UPDATED_AT, direction: DESC}, first: 5) { nodes { number state title } }
+              }
+            }' 2>&1)"; then
+            echo "::error::RENOVATE_TOKEN cannot read every field Renovate's repoInfoQuery" \
+              "needs. Required fine-grained PAT permissions: Commit statuses R/W, Contents R/W," \
+              "Dependabot alerts R, Issues R/W, Pull requests R/W, Workflows R/W." \
+              "See docs/infrastructure-overview.md."
+            echo "${out}"
+            exit 1
+          fi
+          echo "Preflight OK"
+
+      - name: Run Renovate
+        shell: bash
+        env:
+          RENOVATE_TOKEN: ${{ secrets.RENOVATE_TOKEN }}
+          RENOVATE_PLATFORM: github
+          RENOVATE_REPOSITORIES: St-John-Software/fleet-infra
+          RENOVATE_ONBOARDING: 'false'
+          RENOVATE_REQUIRE_CONFIG: required
+          RENOVATE_GIT_AUTHOR: 'Renovate <renovate@users.noreply.github.com>'
+          RENOVATE_BASE_DIR: ${{ runner.temp }}/renovate
+          LOG_LEVEL: ${{ github.event_name == 'workflow_dispatch' && inputs.log_level || 'info' }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+        run: |
+          set -euo pipefail
+          if [ "${DRY_RUN}" = "true" ]; then
+            nix $NIX_FLAGS develop .#renovate --command renovate --dry-run=full
+          else
+            nix $NIX_FLAGS develop .#renovate --command renovate
+          fi

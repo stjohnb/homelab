@@ -1,0 +1,84 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: traefik
+  namespace: flux-system
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: traefik
+      version: "30.x"
+      sourceRef:
+        kind: HelmRepository
+        name: traefik
+        namespace: flux-system
+      interval: 12h
+  targetNamespace: traefik
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+  values:
+    providers:
+      kubernetesIngress:
+        enabled: true
+        publishedService:
+          enabled: true
+    service:
+      type: LoadBalancer
+      spec:
+        loadBalancerIP: 192.168.0.251
+    ports:
+      # forwardedHeaders: keep insecure=false and trustedIPs empty. Traefik's
+      # entrypoint XForwarded handler deletes every client-supplied X-Forwarded-*
+      # header before routing; the Authentik ForwardAuth middleware
+      # (apps/authentik/middleware-forwardauth.yaml) and Grafana's auth.proxy both
+      # depend on that. Setting either would let clients forge X-Forwarded-Host and
+      # choose which Authentik application's policies get evaluated.
+      web:
+        port: 80
+        exposedPort: 80
+        redirectTo:
+          port: websecure
+        forwardedHeaders:
+          trustedIPs: []
+          insecure: false
+      websecure:
+        port: 443
+        exposedPort: 443
+        tls:
+          enabled: true
+        forwardedHeaders:
+          trustedIPs: []
+          insecure: false
+        # Blob pushes stream layers of several hundred MB in one request;
+        # Traefik v3's 60s default readTimeout covers the whole request body.
+        transport:
+          respondingTimeouts:
+            readTimeout: 600s
+    logs:
+      access:
+        enabled: true
+        format: json
+        fields:
+          general:
+            defaultmode: keep
+          headers:
+            defaultmode: drop
+            names:
+              User-Agent: keep
+              Content-Type: keep
+              X-Forwarded-For: keep
+              X-Real-Ip: keep
+              Host: keep
+              Accept: keep
+              Referer: keep
+              Authorization: redact
+              Cookie: redact
+              Set-Cookie: redact
+    ingressClass:
+      enabled: true
+      isDefaultClass: true

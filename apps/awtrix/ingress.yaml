@@ -1,0 +1,104 @@
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: awtrix-kitchen
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default-authentik-auth@kubernetescrd,default-awtrix-basic-auth-header@kubernetescrd
+spec:
+  ingressClassName: traefik-traefik
+  tls:
+    - hosts:
+        - awtrix-kitchen.home.bstjohn.net
+      secretName: wildcard-home-tls
+  rules:
+    - host: awtrix-kitchen.home.bstjohn.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: awtrix-kitchen
+                port:
+                  number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: awtrix-office
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default-authentik-auth@kubernetescrd,default-awtrix-basic-auth-header@kubernetescrd
+spec:
+  ingressClassName: traefik-traefik
+  tls:
+    - hosts:
+        - awtrix-office.home.bstjohn.net
+      secretName: wildcard-home-tls
+  rules:
+    - host: awtrix-office.home.bstjohn.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: awtrix-office
+                port:
+                  number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: awtrix-kitchen-ext
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default-authentik-auth-ext@kubernetescrd,default-awtrix-basic-auth-header@kubernetescrd
+spec:
+  ingressClassName: traefik-traefik
+  tls:
+    - hosts:
+        - awtrix-kitchen.ext.bstjohn.net
+      secretName: wildcard-home-tls
+  rules:
+    - host: awtrix-kitchen.ext.bstjohn.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: awtrix-kitchen
+                port:
+                  number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: awtrix-office-ext
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default-authentik-auth-ext@kubernetescrd,default-awtrix-basic-auth-header@kubernetescrd
+spec:
+  ingressClassName: traefik-traefik
+  tls:
+    - hosts:
+        - awtrix-office.ext.bstjohn.net
+      secretName: wildcard-home-tls
+  rules:
+    - host: awtrix-office.ext.bstjohn.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: awtrix-office
+                port:
+                  number: 80

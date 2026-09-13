@@ -1,0 +1,47 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: navidrome
+  labels:
+    app: navidrome
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: (Host(`music.home.bstjohn.net`) || Host(`music.ext.bstjohn.net`)) && PathPrefix(`/rest`)
+      kind: Rule
+      priority: 100
+      services:
+        - name: navidrome
+          port: 4533
+    - match: (Host(`music.home.bstjohn.net`) || Host(`music.ext.bstjohn.net`)) && PathPrefix(`/share`)
+      kind: Rule
+      priority: 100
+      services:
+        - name: navidrome
+          port: 4533
+    - match: (Host(`music.home.bstjohn.net`) || Host(`music.ext.bstjohn.net`)) && PathPrefix(`/ping`)
+      kind: Rule
+      priority: 100
+      services:
+        - name: navidrome
+          port: 4533
+    - match: Host(`music.home.bstjohn.net`)
+      kind: Rule
+      middlewares:
+        - name: authentik-auth
+          namespace: default
+      services:
+        - name: navidrome
+          port: 4533
+    - match: Host(`music.ext.bstjohn.net`)
+      kind: Rule
+      middlewares:
+        - name: authentik-auth-ext
+          namespace: default
+      services:
+        - name: navidrome
+          port: 4533
+  tls:
+    secretName: wildcard-home-tls

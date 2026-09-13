@@ -1,0 +1,33 @@
+# Proxmox VE cluster CA (public certificate, /etc/pve/pve-root-ca.pem).
+# Consumed by:
+#   - apps/proxmox/servers-transport.yaml   (Traefik rootCAsSecrets)
+#   - apps/monitoring/pve-exporter/deployment.yaml (REQUESTS_CA_BUNDLE)
+# Key name MUST stay `tls.ca` — Traefik v3.1 only accepts `tls.ca` or `ca.crt`.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: proxmox-root-ca
+    namespace: default
+type: Opaque
+stringData:
+    tls.ca: ENC[AES256_GCM,data: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,iv:UIQuRmICyh0ek9DiCJK0paliq7NbZukiQvBqKCTsp0c=,tag:EjGRSzt1TNHri8IjvdR08A==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age17tuhxkp7ma9xfzpsan63c94qdn4c48v6f0z5uak7updragn8ep9q0y3xfz
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB4cG40cGdNcm5UM2hqeGhw
+            UjBKSGsyVjB0NGh5V2dQMTFSSXpNY1B1NnhjCk92RGVpckhYSXdHc3VBOXh3VVBG
+            TnEvNUtqbHN5SHJwMmVrdTBFdm8yVGsKLS0tIEJWa1E3NU0wM1FxQjJJM0JUK2JM
+            dUNrbWZJOGtQcThSbnB5MnFoR0RYSDAKMwL2o1k5qTaWJU3lLO1AIk7O3E4tx6vv
+            3xhdfI7W6qpKPnvIVrmHoi/yVb9dTsr5E6pploSXnS6cE9zRoPozQQ==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-09-07T20:16:20Z"
+    mac: ENC[AES256_GCM,data:Q3HrnXN4B3savd2qMC2aGhCTZLvoYyiwwsZf/MhuTE8p1DVW87JB+kEyfPpwgCxVrrMFSlWZNHZL9ptYT8v6eBL6ycdHHfB29erpnJWQnfkQU+n8FXYT39NawVEz6hlr0LnTHUvUSmr3ikHcRJ00VlXYDaYUDDc++j5eqP/6AMw=,iv:fzbWSSFJauoLNzR5pL40SpRWhq/ZyXl1pcXGtrdelCs=,tag:23bxSUVchoivFDSU1tB0Lw==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sonarr-ingress-restricted
+  labels:
+    app: sonarr
+spec:
+  podSelector:
+    matchLabels:
+      app: sonarr
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [prowlarr, bazarr, overseerr, jellyseerr, seerr, gatus]
+      ports:
+        - protocol: TCP
+          port: 8989

@@ -1,0 +1,200 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transmission
+  labels:
+    app: transmission
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # Ensure only one pod runs at a time
+  selector:
+    matchLabels:
+      app: transmission
+  template:
+    metadata:
+      labels:
+        app: transmission
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: low-priority
+      enableServiceLinks: false
+      # Pinned to the storage node (k3s-nas). The NAS is powered off most of
+      # the time and this service is pointless without its media, so it must
+      # fail cleanly here rather than run without storage. See docs/nas-k3s.md.
+      nodeSelector:
+        node-role.kubernetes.io/storage: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/storage
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      initContainers:
+        # Transmission's settings.json lives on the local-path config PVC and is
+        # NOT GitOps-managed. ratio-limit is pinned to 0.0 with the limit
+        # enabled, so a torrent stops the instant it reaches 100% — we do not
+        # seed (issue #1078). Transmission's seed-ratio goal is
+        # size * ratio-limit, so a goal of 0 is already met at completion and
+        # the daemon stops the torrent, marking it isFinished/stopped, which is
+        # the state Sonarr/Radarr require before they will import and remove it
+        # (issue #728). idle-seeding-limit stays as a backstop for torrents
+        # carrying a per-torrent seed-ratio override.
+        # This patch is idempotent and runs before the daemon starts, which is
+        # the only time settings.json is read.
+        # It also pins rpc-authentication-required:false. Transmission has no
+        # local auth any more — access is gated by Authentik ForwardAuth on the
+        # ingress plus networkpolicy.yaml on the ClusterIP (#921). The image's
+        # own init already sets this false when USER/PASS are unset; pinning it
+        # here makes the on-disk state correct before the daemon starts.
+        - name: set-seed-limits
+          image: busybox:1.37
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              CONFIG=/config/settings.json
+              # An empty file means an ungraceful shutdown truncated it; remove
+              # it so transmission regenerates a valid one on startup.
+              if [ -f "$CONFIG" ] && [ ! -s "$CONFIG" ]; then
+                rm -f "$CONFIG"
+              fi
+              # NOTE: on a fresh install settings.json does not exist yet. The
+              # patch is a no-op on first boot and applies on the next restart.
+              if [ -s "$CONFIG" ]; then
+                for kv in \
+                  'ratio-limit:0.0' \
+                  'ratio-limit-enabled:true' \
+                  'idle-seeding-limit:30' \
+                  'idle-seeding-limit-enabled:true' \
+                  'rpc-authentication-required:false'
+                do
+                  key=${kv%:*}
+                  val=${kv##*:}
+                  if grep -q "\"$key\"" "$CONFIG"; then
+                    sed -i "s|\"$key\"[[:space:]]*:[[:space:]]*[A-Za-z0-9.]*|\"$key\": $val|" "$CONFIG"
+                  else
+                    sed -i "1s|^{|{\n    \"$key\": $val,|" "$CONFIG"
+                  fi
+                done
+              fi
+          volumeMounts:
+            - name: transmission-config
+              mountPath: /config
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 64Mi
+              cpu: 100m
+      # Kill switch is now embedded in WireGuard config PostUp/PostDown
+      containers:
+        # WireGuard sidecar container
+        - name: wireguard
+          image: linuxserver/wireguard:1.0.20250521
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+                - SYS_MODULE
+            # Run as privileged to set sysctls and load kernel modules
+            privileged: true
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: "Europe/London"
+          volumeMounts:
+            - name: wg-config
+              mountPath: /config/wg_confs
+              readOnly: true
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: 50m
+            limits:
+              memory: 128Mi
+              cpu: 200m
+
+        # Transmission container
+        - name: transmission
+          image: linuxserver/transmission:4.1.1
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: "Europe/London"
+            # Torrent port (must match iptables rule above)
+            - name: PEERPORT
+              value: "51413"
+          ports:
+            - name: web
+              containerPort: 9091
+              protocol: TCP
+            - name: torrent-tcp
+              containerPort: 51413
+              protocol: TCP
+            - name: torrent-udp
+              containerPort: 51413
+              protocol: UDP
+          volumeMounts:
+            - name: transmission-config
+              mountPath: /config
+            - name: ssdpool
+              mountPath: /downloads
+              subPath: downloads
+            - name: transmission-watch
+              mountPath: /watch
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 1Gi
+              cpu: 1000m
+          startupProbe:
+            tcpSocket:
+              port: 9091
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket:
+              port: 9091
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 9091
+            periodSeconds: 10
+            timeoutSeconds: 5
+
+      volumes:
+        - name: wg-config
+          secret:
+            secretName: transmission-wireguard
+            items:
+              - key: wg0.conf
+                path: wg0.conf
+            defaultMode: 0600
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules
+            type: Directory
+        - name: transmission-config
+          persistentVolumeClaim:
+            claimName: transmission-local-config-pvc
+        - name: ssdpool
+          persistentVolumeClaim:
+            claimName: ssdpool-pvc
+        - name: transmission-watch
+          emptyDir: {}
+
+      # Ensure pod doesn't restart too quickly if there are issues
+      restartPolicy: Always

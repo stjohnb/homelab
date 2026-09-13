@@ -1,0 +1,111 @@
+---
+name: Update forgejo image
+
+# Dispatched by St-John-Software/forgejo's .forgejo/workflows/build-image.yml
+# on git.home.bstjohn.net after it pushes a new image to zot, authorized by
+# the org-level FLEET_INFRA_VERSION_BUMP PAT.
+
+# Triggers removed for the public snapshot — this workflow is intentionally disabled.
+# See the private source repository for the active version.
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: forgejo-update
+  cancel-in-progress: false
+
+# sed/git for the tag bump come from this repo's flake.nix `scripts` devShell
+# (mkShell's stdenv provides sed and the coreutils) via the job-level default
+# shell — the self-hosted NixOS runners provide only nix/git/docker. The
+# preflight step runs before checkout, so no flake exists yet: it overrides
+# the default shell with plain bash and uses only bash builtins.
+jobs:
+  update:
+    runs-on: [self-hosted, linux]
+    defaults:
+      run:
+        shell: nix --extra-experimental-features nix-command --extra-experimental-features flakes develop ${{ github.workspace }}#scripts --command bash -euo pipefail {0}
+    steps:
+      - name: Preflight — require FLEET_INFRA_VERSION_BUMP
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.FLEET_INFRA_VERSION_BUMP }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN}" ]; then
+            echo "::error::FLEET_INFRA_VERSION_BUMP is missing or empty." \
+              "Recreate the org-level fine-grained PAT — see docs/infrastructure-overview.md."
+            exit 1
+          fi
+
+      # PAT checkout (not GITHUB_TOKEN) so the bump branch push and PR are authored
+      # by a real user account — GITHUB_TOKEN-authored PRs do not trigger
+      # pull_request workflows, so ci.yml would never run on the bump branch and
+      # Claws' auto-merger would skip the PR (it requires passing checks).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          token: ${{ secrets.FLEET_INFRA_VERSION_BUMP }}
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Validate tag
+        env:
+          NEW_TAG: ${{ inputs.tag }}
+        run: |
+          [[ "${NEW_TAG}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{7,12}-rootless$ ]] \
+            || { echo "Invalid tag format: ${NEW_TAG} (expected <upstream-version>-<short sha>-rootless)"; exit 1; }
+
+      - name: Update image tag
+        id: update-tag
+        env:
+          NEW_TAG: ${{ inputs.tag }}
+        run: |
+          IMG=registry.home.bstjohn.net/st-john-software/forgejo
+          FILES=(apps/forgejo/deployment.yaml apps/forgejo/cronjob-backup.yaml)
+          for f in "${FILES[@]}"; do
+            grep -q "${IMG}:" "$f" || { echo "::error::${f} no longer references ${IMG}"; exit 1; }
+            sed -i "s|${IMG}:[^ ]*|${IMG}:${NEW_TAG}|" "$f"
+            grep -q "${IMG}:${NEW_TAG}" "$f" || { echo "::error::failed to bump ${f}"; exit 1; }
+          done
+          if git diff --quiet "${FILES[@]}"; then
+            echo "Image already at ${NEW_TAG}, nothing to do."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Unlike the other update-*.yml receivers, this PR must NOT carry the
+      # auto-bump label: Recreate rollout runs a one-way SQLite migration, so
+      # merging needs the pre-merge checklist in the PR body (manual backup,
+      # release-notes read, possible startupProbe widening) rather than an
+      # unattended merge the moment ci.yml passes. See the Upgrade Runbook in
+      # docs/forgejo.md.
+      - name: Open pull request
+        if: steps.update-tag.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
+        with:
+          token: ${{ secrets.FLEET_INFRA_VERSION_BUMP }}
+          branch: automation/bump-forgejo-${{ inputs.tag }}
+          delete-branch: true
+          commit-message: "chore(forgejo): update image to ${{ inputs.tag }}"
+          title: "chore(forgejo): update image to ${{ inputs.tag }}"
+          body: |
+            Automated image update — new forgejo release from St-John-Software/forgejo.
+
+            Bumps both `apps/forgejo/deployment.yaml` and
+            `apps/forgejo/cronjob-backup.yaml` together — they must always run the
+            same binary, since `forgejo dump` reads the database with the schema
+            its own binary expects.
+
+            **Pre-merge checklist** (see the Upgrade Runbook in `docs/forgejo.md`):
+            - [ ] Run the Stage 1 backup on demand (`docs/forgejo-backups.md` "Manual runs")
+            - [ ] Read the upstream release notes for this version
+            - [ ] If they warn of a long migration, widen `startupProbe.failureThreshold` on this branch
+            - [ ] LGTM
+
+            Triggered by @${{ github.event.sender.login }} via run ${{ github.run_id }}.
+          labels: dependencies

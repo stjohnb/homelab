@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whisper
+  namespace: default
+  labels:
+    app: whisper
+spec:
+  replicas: 1
+  strategy:
+    # PVC is RWO — rolling update would deadlock waiting for the old pod
+    # to release the volume before the new pod can mount it.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: whisper
+  template:
+    metadata:
+      labels:
+        app: whisper
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: standard
+      terminationGracePeriodSeconds: 30
+      runtimeClassName: nvidia
+      nodeSelector:
+        node-role.kubernetes.io/gpu: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: whisper
+          image: onerahmet/openai-whisper-asr-webservice:v1.8.2-gpu
+          ports:
+            - containerPort: 9000
+              name: http
+          env:
+            - name: ASR_ENGINE
+              value: faster_whisper
+            # If CUDA OOM occurs with Ollama warm simultaneously, drop to "base"
+            # or set ASR_DEVICE=cpu (3-5x real-time on 12 Ryzen cores).
+            - name: ASR_MODEL
+              value: small
+            - name: ASR_MODEL_QUANTIZATION
+              value: int8_float16
+            - name: ASR_DEVICE
+              value: cuda
+            - name: HF_HOME
+              value: /cache/huggingface
+            - name: XDG_CACHE_HOME
+              value: /cache
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: 4000m
+              memory: 6Gi
+              nvidia.com/gpu: 1
+          startupProbe:
+            httpGet:
+              path: /openapi.json
+              port: 9000
+            # Cold start downloads ~500 MiB from HuggingFace; subsequent starts
+            # use the PVC cache and are fast.
+            failureThreshold: 60
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /openapi.json
+              port: 9000
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /openapi.json
+              port: 9000
+            periodSeconds: 30
+          volumeMounts:
+            - name: models
+              mountPath: /cache
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: whisper-models-pvc

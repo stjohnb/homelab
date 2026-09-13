@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tailnet-dns-corefile
+  labels:
+    app: tailnet-dns
+data:
+  Corefile: |
+    # Authoritative for home.bstjohn.net on the tailnet only. Answers every
+    # name in the zone (apex + wildcard) with the k3s node's Tailscale
+    # address, where svclb-traefik-traefik binds 80/443. Tailscale split DNS
+    # routes only this zone here; everything else is REFUSED so this is never
+    # an open resolver.
+    home.bstjohn.net:5353 {
+        errors
+        template IN A {
+            answer "{{ .Name }} 60 IN A 100.78.7.18"
+        }
+        template IN AAAA {
+            rcode NOERROR
+        }
+        template ANY ANY {
+            rcode NOERROR
+        }
+    }
+
+    # Authoritative for exactly one public name: wall.bstjohn.net, the office
+    # wall dashboard grid on the Hetzner prod cluster (production-infra#1575).
+    # Answers the prod cluster's tailnet address so a tailnet device away from
+    # home arrives from its own 100.x, which the app's Traefik ipAllowList
+    # (home public IPv4 + 100.64.0.0/10) admits; the public record
+    # (178.104.218.151) would give it a 403 from its own egress IP (#1257).
+    # The zone is deliberately NOT bstjohn.net — that would swallow grafana,
+    # plausible, www and mail for every tailnet client.
+    # This address is NOT pinned: recreating the Hetzner server registers a
+    # new tailnet node with a new 100.x and this goes stale. The "Wall DNS"
+    # Gatus check catches it; the fix is a one-line PR here.
+    wall.bstjohn.net:5353 {
+        errors
+        template IN A {
+            answer "{{ .Name }} 60 IN A 100.115.153.16"
+        }
+        template IN AAAA {
+            rcode NOERROR
+        }
+        template ANY ANY {
+            rcode NOERROR
+        }
+    }
+
+    # Everything else under bstjohn.net: forwarded to public DNS. The Tailscale
+    # split-DNS route is the whole domain (the admin console allows only one
+    # "Restrict to search domain" per nameserver entry, and both home. and
+    # wall. must come here), so every tailnet device sends all bstjohn.net
+    # queries to this resolver — grafana, plausible, www, ext, the apex MX/TXT
+    # included. Without this block they hit the catch-all below and get
+    # REFUSED on every tailnet device (#1264). CoreDNS picks the longest
+    # matching zone, so home.bstjohn.net and wall.bstjohn.net above still win
+    # for their own names. Zone-scoped, so the catch-all still REFUSES
+    # everything outside bstjohn.net and this is never an open resolver.
+    bstjohn.net:5353 {
+        errors
+        cache 60
+        forward . 1.1.1.1 1.0.0.1 9.9.9.9 {
+            policy sequential
+        }
+    }
+
+    .:5353 {
+        errors
+        health :8080
+        ready :8181
+        prometheus :9153
+        template ANY ANY {
+            rcode REFUSED
+        }
+    }

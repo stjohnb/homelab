@@ -1,0 +1,195 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forgejo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: forgejo
+  template:
+    metadata:
+      labels:
+        app: forgejo
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: standard
+      enableServiceLinks: false
+      imagePullSecrets:
+        - name: registry-pull
+      containers:
+        - name: forgejo
+          # Self-built (docs/forgejo.md "Self-built image"): upstream Forgejo at the
+          # version pinned in St-John-Software/forgejo's UPSTREAM_VERSION, plus that
+          # repo's patches/ series ([actions] OIDC_ISSUER_URL). Published by that
+          # repo's .forgejo/workflows/build-image.yml, bumped here by
+          # .github/workflows/update-forgejo.yml; must match
+          # apps/forgejo/cronjob-backup.yaml (check-image-tag-consistency).
+          image: registry.home.bstjohn.net/st-john-software/forgejo:15.0.7-dc847b3-rootless
+          ports:
+            - containerPort: 3000
+            - containerPort: 2222
+          env:
+            - name: TZ
+              value: Europe/London
+            # Database — shared apps/postgres instance (#1216). The role,
+            # database and password come from migrations/0030-forgejo-db.sh.
+            # environment-to-ini writes these into app.ini on the PVC at every
+            # container start, which is also how apps/forgejo/cronjob-backup.yaml
+            # learns the DB config (it overrides the entrypoint, so it never runs
+            # environment-to-ini itself).
+            - name: FORGEJO__database__DB_TYPE
+              value: postgres
+            - name: FORGEJO__database__HOST
+              value: postgres.default.svc.cluster.local:5432
+            - name: FORGEJO__database__NAME
+              value: forgejo
+            - name: FORGEJO__database__USER
+              value: forgejo
+            - name: FORGEJO__database__SSL_MODE
+              value: disable
+            - name: FORGEJO__database__PASSWD
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-db-secret
+                  key: password
+            # Forgejo's default MAX_OPEN_CONNS is 100 -- i.e. one client entitled
+            # to every slot on the pre-#1237, 100-connection server. This cap is
+            # PREVENTIVE, not a fix for 2026-09-09: the slots were already
+            # exhausted ~100s before this pod started and it never obtained a
+            # connection at all (#1235). Who held them is unattributed. 20 is
+            # well above Forgejo's observed steady state (5).
+            - name: FORGEJO__database__MAX_OPEN_CONNS
+              value: "20"
+            - name: FORGEJO__database__MAX_IDLE_CONNS
+              value: "5"
+            - name: FORGEJO__database__CONN_MAX_LIFETIME
+              value: "3m"
+            # Forgejo's default is 10 attempts x 3s = ~30s, not enough on
+            # 2026-09-09: the pod burned all ten during the squeeze and exited 1
+            # twice. 20 x 5s = 100s. A startupProbe cannot help -- the process
+            # exits, it does not hang.
+            - name: FORGEJO__database__DB_RETRIES
+              value: "20"
+            - name: FORGEJO__database__DB_RETRY_BACKOFF
+              value: "5s"
+            - name: FORGEJO__server__DOMAIN
+              value: git.home.bstjohn.net
+            - name: FORGEJO__server__ROOT_URL
+              value: https://git.home.bstjohn.net/
+            - name: FORGEJO__server__SSH_DOMAIN
+              value: git.home.bstjohn.net
+            - name: FORGEJO__server__SSH_PORT
+              value: "30022"
+            - name: FORGEJO__server__SSH_LISTEN_PORT
+              value: "2222"
+            - name: FORGEJO__server__LFS_START_SERVER
+              value: "true"
+            # Mirror policy — see docs/forgejo.md ("GitHub copies").
+            # Forgejo -> GitHub push mirrors are retired (#1279): every consumer
+            # had to special-case "GitHub is a stale mirror", and the off-node
+            # copy is the nightly `forgejo dump` (docs/forgejo-backups.md).
+            # No push or pull mirrors exist on this instance any more — the last
+            # one (perudo -> github.com/St-John-Software/perudo) was deleted
+            # 2026-09-10 once perudo#307 moved its AWS deploy/infra jobs onto
+            # Forgejo Actions OIDC (#1296). ENABLED="false" turns the mirror
+            # subsystem off outright; the DISABLE_NEW_* flags stay "true" so the
+            # policy still holds if ENABLED is ever flipped back.
+            - name: FORGEJO__mirror__ENABLED
+              value: "false"
+            - name: FORGEJO__mirror__DISABLE_NEW_PULL
+              value: "true"
+            - name: FORGEJO__mirror__DISABLE_NEW_PUSH
+              value: "true"
+            - name: FORGEJO__mirror__DEFAULT_INTERVAL
+              value: "1h"
+            - name: FORGEJO__mirror__MIN_INTERVAL
+              value: "10m"
+            # Forgejo Actions — see docs/forgejo-actions.md
+            # DEFAULT_ACTIONS_URL must be github.com: migrated workflows use
+            # actions/checkout, actions/setup-node, codecov/codecov-action and
+            # aws-actions/configure-aws-credentials, none of which are mirrored
+            # on the default data.forgejo.org.
+            - name: FORGEJO__actions__ENABLED
+              value: "true"
+            - name: FORGEJO__actions__DEFAULT_ACTIONS_URL
+              value: https://github.com
+            # Actions OIDC issuer override — a patch carried only by our fork
+            # (docs/forgejo.md "Self-built image"). Forgejo Actions ID tokens are
+            # signed with `iss` = this URL, and the discovery document at
+            # /api/actions/.well-known/openid-configuration advertises it plus
+            # jwks_uri = <issuer>/.well-known/keys, so AWS IAM (which cannot
+            # reach git.home.bstjohn.net) can fetch and verify them. The
+            # documents are mirrored to that public URL by
+            # .github/workflows/publish-forgejo-oidc.yml. Everything else still
+            # uses ROOT_URL. Must be absolute https, no trailing slash, no
+            # credentials/query/fragment — an invalid value fails startup.
+            - name: FORGEJO__actions__OIDC_ISSUER_URL
+              value: https://www.bstjohn.net/forgejo-oidc
+            # Web sessions — keep Forgejo's own login session closer to the
+            # Authentik OIDC session users already have. Upstream defaults to
+            # an in-memory session provider and a 1-day SESSION_LIFE_TIME, which
+            # means a pod restart or a day of inactivity drops users at
+            # Forgejo's login page even though Authentik can immediately SSO
+            # them back in. The db provider reuses the [database] config above.
+            - name: FORGEJO__session__PROVIDER
+              value: db
+            - name: FORGEJO__session__PROVIDER_CONFIG
+              value: ""
+            - name: FORGEJO__session__SESSION_LIFE_TIME
+              value: "2592000"
+            # Authentik SSO — the auth source itself lives in Forgejo's DB and is
+            # created by migrations/0019-forgejo-oidc-auth-source.sh. These keys
+            # only control how OAuth2 logins map onto Forgejo accounts.
+            - name: FORGEJO__oauth2_client__ENABLE_AUTO_REGISTRATION
+              value: "true"
+            - name: FORGEJO__oauth2_client__USERNAME
+              value: preferred_username
+            # "login" (not "auto"): on an email clash Forgejo shows a link-account
+            # page so an existing local account is adopted rather than colliding.
+            - name: FORGEJO__oauth2_client__ACCOUNT_LINKING
+              value: login
+            - name: FORGEJO__oauth2_client__UPDATE_AVATAR
+              value: "true"
+            # No mailer is configured — confirmation email would strand new users.
+            - name: FORGEJO__oauth2_client__REGISTER_EMAIL_CONFIRM
+              value: "false"
+            - name: FORGEJO__service__ALLOW_ONLY_EXTERNAL_REGISTRATION
+              value: "true"
+            # Legacy OpenID 2.0 (/user/login/openid) is not Authentik and is unused.
+            - name: FORGEJO__openid__ENABLE_OPENID_SIGNIN
+              value: "false"
+            - name: FORGEJO__openid__ENABLE_OPENID_SIGNUP
+              value: "false"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /api/healthz
+              port: 3000
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /api/healthz
+              port: 3000
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/healthz
+              port: 3000
+            periodSeconds: 15
+          volumeMounts:
+            - mountPath: /var/lib/gitea
+              name: forgejo-data
+      volumes:
+        - name: forgejo-data
+          persistentVolumeClaim:
+            claimName: forgejo-data

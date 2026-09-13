@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: homepage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: homepage
+  template:
+    metadata:
+      labels:
+        app: homepage
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: standard
+      enableServiceLinks: false
+      containers:
+        - name: homepage
+          image: ghcr.io/gethomepage/homepage:v2.1.2
+          env:
+            # Homepage v1.0+ validates the HTTP Host header against this list and
+            # returns 400 for anything not listed. Three callers must be covered:
+            #  - Traefik ingress            → home.bstjohn.net
+            #  - Gatus check (apps/gatus/config.yaml) → homepage:3000
+            #  - kubelet probes             → the pod IP, injected below
+            # MY_POD_IP must be declared BEFORE HOMEPAGE_ALLOWED_HOSTS: Kubernetes
+            # $(VAR) expansion only resolves variables defined earlier in the list.
+            - name: MY_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: HOMEPAGE_ALLOWED_HOSTS
+              value: "home.bstjohn.net,homepage:3000,homepage.default.svc.cluster.local:3000,$(MY_POD_IP):3000"
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    # Warm the Next.js ISR cache for "/" (#935).
+                    # The upstream image runs `mkdir config` then `pnpm run build`, so
+                    # "/" is prerendered at Docker build time from src/skeleton/*.yaml
+                    # ("My First Group", "My Second Group", ...). prerender-manifest.json
+                    # records initialRevalidateSeconds:false, so that stale HTML is served
+                    # on every request until something calls /api/revalidate -- making the
+                    # skeleton groups flash before client-side SWR swaps in the real config.
+                    # 127.0.0.1:3000 is always allowed by Homepage's host-validation
+                    # middleware regardless of HOMEPAGE_ALLOWED_HOSTS.
+                    # Always exit 0: a failing postStart hook kills the container.
+                    for _ in $(seq 1 60); do
+                      if wget -q -O /dev/null http://127.0.0.1:3000/api/revalidate; then
+                        exit 0
+                      fi
+                      sleep 1
+                    done
+                    exit 0
+          livenessProbe:
+            httpGet:
+              path: /api/healthcheck
+              port: 3000
+            periodSeconds: 15
+            timeoutSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /api/healthcheck
+              port: 3000
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 18
+          readinessProbe:
+            httpGet:
+              path: /api/healthcheck
+              port: 3000
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /app/config/settings.yaml
+              subPath: settings.yaml
+            - name: config
+              mountPath: /app/config/services.yaml
+              subPath: services.yaml
+            - name: config
+              mountPath: /app/config/bookmarks.yaml
+              subPath: bookmarks.yaml
+            - name: config
+              mountPath: /app/config/widgets.yaml
+              subPath: widgets.yaml
+            - name: config
+              mountPath: /app/config/kubernetes.yaml
+              subPath: kubernetes.yaml
+            - name: config
+              mountPath: /app/config/docker.yaml
+              subPath: docker.yaml
+            - name: config
+              mountPath: /app/config/custom.css
+              subPath: custom.css
+            - name: config
+              mountPath: /app/config/custom.js
+              subPath: custom.js
+            - name: logs
+              mountPath: /app/config/logs
+      volumes:
+        - name: config
+          configMap:
+            name: homepage-config
+        - name: logs
+          emptyDir: {}

@@ -1,0 +1,215 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forgejo-runner
+  labels:
+    app: forgejo-runner
+spec:
+  replicas: 1
+  # Two daemons sharing one registration UUID confuse Forgejo's runner
+  # bookkeeping, so never overlap old and new pods.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: forgejo-runner
+  template:
+    metadata:
+      labels:
+        app: forgejo-runner
+        component: forgejo-runner
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: low-priority
+      terminationGracePeriodSeconds: 60
+      # Keep CI off the GPU node (ryzen) and the NAS node (k3s-nas). Both carry
+      # NoSchedule taints this pod does not tolerate; the affinity is
+      # belt-and-braces in case a taint is ever removed.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/gpu
+                    operator: DoesNotExist
+                  - key: node-role.kubernetes.io/storage
+                    operator: DoesNotExist
+      containers:
+        - name: runner
+          image: code.forgejo.org/forgejo/runner:12.13.2
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              until [ -S /dind-sock/docker.sock ] && nc -z localhost 2376; do
+                echo "waiting for the docker daemon..."
+                sleep 5
+              done
+              exec forgejo-runner --config /config/config.yml daemon \
+                --url "https://git.home.bstjohn.net/" \
+                --uuid "${RUNNER_UUID}" \
+                --token-url "file:/secret/token"
+          env:
+            - name: TZ
+              value: Europe/London
+            # act_runner's configCheck (internal/app/cmd/daemon.go, v12.13.2)
+            # overwrites this with container.docker_host from config.yml, so the
+            # two MUST agree. It is a unix socket, not tcp://localhost:2376,
+            # because that is the only shape act_runner can bind-mount into job
+            # containers (see docs/forgejo-actions.md).
+            # DOCKER_CERT_PATH / DOCKER_TLS_VERIFY are deliberately absent: the
+            # docker client's FromEnv would install a TLS transport and then use
+            # scheme "https" over a unix socket, breaking every job.
+            - name: DOCKER_HOST
+              value: unix:///dind-sock/docker.sock
+            - name: RUNNER_UUID
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-runner-secret
+                  key: uuid
+            # The job container image lives on the LAN registry
+            # (registry.home.bstjohn.net/st-john-software/forgejo-runner-nix),
+            # which requires auth for reads. act_runner pulls it itself and
+            # passes X-Registry-Auth to the dind daemon; it takes those
+            # credentials from docker's config.json, located via DOCKER_CONFIG.
+            # See act/container/docker/{pull,auth}.go in forgejo/runner v12.13.2.
+            - name: DOCKER_CONFIG
+              value: /docker-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+              ephemeral-storage: 4Gi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: secret
+              mountPath: /secret
+              readOnly: true
+            - name: docker-config
+              mountPath: /docker-config
+              readOnly: true
+            - name: docker-certs
+              mountPath: /certs
+            - name: docker-socket
+              mountPath: /dind-sock
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+        - name: dind
+          image: docker.io/docker:29.6.2-dind
+          # dockerd-entrypoint.sh appends any leading-dash args to its default
+          # dockerd invocation, so the default unix socket and the TLS
+          # tcp://0.0.0.0:2376 listener are both preserved. The extra listener
+          # lives on an emptyDir shared with the runner container so act_runner
+          # can bind-mount it into job containers as /var/run/docker.sock.
+          # --group=1000 makes the socket 0660 root:1000, matching the runner
+          # container's runAsGroup (dockerd falls back to a numeric GID when no
+          # group of that name exists).
+          # Both MTU flags are needed and they cover different networks.
+          # The pod's eth0 is 1450 (flannel VXLAN costs 50 bytes of a 1500-byte
+          # uplink); dockerd defaults everything to 1500. Left at 1500 a
+          # container advertises MSS 1460, the remote sends full-size frames,
+          # and delivery depends on our ICMP frag-needed reaching the remote.
+          # When that ICMP is filtered upstream the flow blackholes until
+          # PMTUD/RTO backs it down (~21-30s) or the client gives up.
+          # --mtu=1450 covers ONLY the default bridge (docker0) — i.e. plain
+          # `docker build` and `docker run` with no --network. That was #1194
+          # (apt fetches inside `docker build` stalling 30s at a time).
+          # --default-network-opt=bridge=... covers networks created AFTER
+          # daemon start. act_runner has container.network: "" in config.yaml,
+          # so it creates a fresh user-defined bridge (WORKFLOW-<hash>) per job
+          # and every job container landed on a 1500 network regardless of
+          # --mtu. That was #1288: `tofu init` on the perudo repo timing out on
+          # github.com release downloads while AWS endpoints in the same job
+          # were fine. Requires Docker 26+ (we run 29.x); syntax is
+          # driver=key=value.
+          # Keep both values in step with the pod MTU if the CNI or its overlay
+          # ever changes, and verify BOTH paths after a rollout:
+          #   kubectl exec deploy/forgejo-runner -c runner -- cat /sys/class/net/eth0/mtu
+          #   kubectl exec deploy/forgejo-runner -c dind -- sh -c \
+          #     'docker network create mtucheck >/dev/null && \
+          #      docker run --rm --network mtucheck alpine:3.22 cat /sys/class/net/eth0/mtu; \
+          #      docker network rm mtucheck >/dev/null'
+          args:
+            - "--host=unix:///dind-sock/docker.sock"
+            - "--group=1000"
+            - "--mtu=1450"
+            - "--default-network-opt=bridge=com.docker.network.driver.mtu=1450"
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: /certs
+          ports:
+            - containerPort: 2376
+              name: docker
+          # Privileged is unavoidable for Docker-in-Docker; this is why
+          # apps/forgejo-runner/deployment.yaml is a kubesec exception in CI.
+          securityContext:
+            privileged: true
+          readinessProbe:
+            tcpSocket:
+              port: 2376
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 4000m
+              memory: 4Gi
+              ephemeral-storage: 20Gi
+          volumeMounts:
+            - name: docker-certs
+              mountPath: /certs
+            - name: docker-socket
+              mountPath: /dind-sock
+            - name: docker-data
+              mountPath: /var/lib/docker
+      volumes:
+        - name: config
+          configMap:
+            name: forgejo-runner-config
+        - name: secret
+          secret:
+            secretName: forgejo-runner-secret
+            defaultMode: 0444
+        # docker/cli only ever reads <DOCKER_CONFIG>/config.json, so the
+        # Secret's .dockerconfigjson key must be remapped — without items: the
+        # pull silently goes anonymous and fails with "pull access denied".
+        - name: docker-config
+          secret:
+            secretName: registry-pull
+            defaultMode: 0444
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+        - name: docker-certs
+          emptyDir: {}
+        # Shared only between the two containers of this pod; never a hostPath.
+        - name: docker-socket
+          emptyDir: {}
+        - name: docker-data
+          emptyDir:
+            sizeLimit: 15Gi
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

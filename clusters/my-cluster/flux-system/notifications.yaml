@@ -1,0 +1,111 @@
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Provider
+metadata:
+  name: slack
+  namespace: flux-system
+spec:
+  type: slack
+  channel: lab
+  secretRef:
+    name: flux-slack-webhook
+---
+# Minimal, low-noise notifications: Slack receives failures only.
+# Successful deploys are recorded as Grafana annotations (see the
+# grafana-annotations Alert below), not posted to Slack.
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Alert
+metadata:
+  name: slack-errors
+  namespace: flux-system
+spec:
+  providerRef:
+    name: slack
+  eventSeverity: error
+  eventSources:
+    # Fleet-infra (cluster config)
+    - kind: Kustomization
+      name: flux-system
+      namespace: flux-system
+    - kind: Kustomization
+      name: infrastructure
+      namespace: flux-system
+    - kind: Kustomization
+      name: config
+      namespace: flux-system
+    # Fleet-services (apps)
+    - kind: Kustomization
+      name: apps
+      namespace: flux-system
+    # Secret-generation migrations (./migrations)
+    - kind: Kustomization
+      name: migrations
+      namespace: flux-system
+    # Helm releases managed by flux
+    - kind: HelmRelease
+      name: cert-manager
+      namespace: flux-system
+    - kind: HelmRelease
+      name: headlamp
+      namespace: default
+    - kind: HelmRelease
+      name: traefik
+      namespace: flux-system
+    - kind: HelmRelease
+      name: kube-prometheus-stack
+      namespace: default
+  summary: "Flux apply failed"
+---
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Provider
+metadata:
+  name: grafana
+  namespace: flux-system
+spec:
+  type: grafana
+  address: http://kube-prometheus-stack-grafana.default.svc/api/annotations
+  secretRef:
+    name: grafana-annotations-token
+---
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Alert
+metadata:
+  name: grafana-annotations
+  namespace: flux-system
+spec:
+  providerRef:
+    name: grafana
+  eventSeverity: info
+  eventSources:
+    - kind: Kustomization
+      name: flux-system
+      namespace: flux-system
+    - kind: Kustomization
+      name: infrastructure
+      namespace: flux-system
+    - kind: Kustomization
+      name: config
+      namespace: flux-system
+    - kind: Kustomization
+      name: apps
+      namespace: flux-system
+    - kind: Kustomization
+      name: migrations
+      namespace: flux-system
+    - kind: HelmRelease
+      name: cert-manager
+      namespace: flux-system
+    - kind: HelmRelease
+      name: headlamp
+      namespace: default
+    - kind: HelmRelease
+      name: traefik
+      namespace: flux-system
+    - kind: HelmRelease
+      name: kube-prometheus-stack
+      namespace: default
+  inclusionList:
+    - "^Helm upgrade succeeded"
+    - "^Helm install succeeded"
+    - "^Applied revision"
+    - "^Reconciliation finished"
+  summary: "Flux deployment"

@@ -1,0 +1,89 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: seerr-oidc-init-script
+  labels:
+    app: seerr
+data:
+  oidc-init.py: |
+    # Enforce the Authentik OIDC provider in Seerr's settings.json (#820).
+    # This preview build has no UI for OIDC, so without this the config is
+    # hand-typed runtime state - exactly the drift #817 fixed for Jellyfin.
+    # initContainer, NOT a sidecar: Settings.save() serialises the whole
+    # in-memory object over settings.json, so a live writer would be clobbered
+    # by any UI settings change. load() does mergeSettings(defaults, file) with
+    # the file winning, so writing before start-up is authoritative.
+    # Also chowns the tree: seerr runs as node (1000:1000) and this local-path
+    # PV gets no kubelet fsGroup.
+    import json, os
+
+    CONFIG_DIR = "/app/config"
+    PATH = os.path.join(CONFIG_DIR, "settings.json")
+    UID = GID = 1000
+    APP_URL = "https://seerr.home.bstjohn.net"
+    SECRET = os.environ.get("SEERR_OIDC_CLIENT_SECRET", "").strip()
+    PROVIDER = {
+        "slug": "authentik",
+        "name": "Authentik",
+        # Trailing slash is load-bearing: openid-client compares the issuer in
+        # the discovery document verbatim and rejects a mismatch.
+        "issuerUrl": "https://auth.home.bstjohn.net/application/o/seerr/",
+        "clientId": "seerr",
+        "clientSecret": SECRET,
+        "newUserLogin": True,
+    }
+
+    def log(msg):
+        print("oidc-init: " + msg, flush=True)
+
+    def merge():
+        if not SECRET:
+            log("SEERR_OIDC_CLIENT_SECRET empty - skipping OIDC config")
+            return
+        if not os.path.exists(PATH):
+            log("no settings.json yet - skipping; restart the pod once Seerr "
+                "has written one")
+            return
+        try:
+            with open(PATH) as fh:
+                data = json.load(fh)
+        except Exception as exc:
+            # Never exit non-zero: that would wedge the pod in Init:CrashLoop.
+            log("could not parse settings.json (%s) - leaving it alone" % exc)
+            return
+        before = json.dumps(data, sort_keys=True)
+        main = data.setdefault("main", {})
+        main["oidcLogin"] = True
+        # Local login stays on as the lockout fallback if this preview build's
+        # OIDC path breaks (it has before - upstream discussion #2721).
+        main["localLogin"] = True
+        main["applicationUrl"] = APP_URL
+        oidc = data.setdefault("oidc", {})
+        providers = oidc.setdefault("providers", [])
+        for p in providers:
+            if p.get("slug") == PROVIDER["slug"]:
+                p.update(PROVIDER)   # merge, keep keys Seerr added itself
+                break
+        else:
+            providers.append(dict(PROVIDER))
+        if json.dumps(data, sort_keys=True) == before:
+            log("settings.json already correct")
+            return
+        tmp = PATH + ".init-tmp"
+        with open(tmp, "w") as fh:
+            json.dump(data, fh, indent=1)
+        os.replace(tmp, PATH)
+        log("wrote OIDC provider %r and oidcLogin=true" % PROVIDER["slug"])
+
+    def chown_tree():
+        os.chown(CONFIG_DIR, UID, GID)
+        for root, dirs, files in os.walk(CONFIG_DIR):
+            for name in dirs + files:
+                try:
+                    os.chown(os.path.join(root, name), UID, GID)
+                except FileNotFoundError:
+                    pass
+        log("chowned %s to %d:%d" % (CONFIG_DIR, UID, GID))
+
+    merge()
+    chown_tree()

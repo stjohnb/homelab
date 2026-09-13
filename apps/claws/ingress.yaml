@@ -1,0 +1,35 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: claws
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik-traefik
+  tls:
+  - hosts:
+    - claws.home.bstjohn.net
+    - claws.ext.bstjohn.net
+    secretName: wildcard-home-tls
+  rules:
+  - host: claws.home.bstjohn.net
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: claws
+            port:
+              number: 3000
+  - host: claws.ext.bstjohn.net
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: claws
+            port:
+              number: 3000

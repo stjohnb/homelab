@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: immich
+  labels:
+    app: immich
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 2283
+      targetPort: 2283
+      protocol: TCP
+  selector:
+    app: immich

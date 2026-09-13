@@ -1,0 +1,102 @@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: renovate
+  labels:
+    app: renovate
+spec:
+  schedule: "0 7 * * 1"
+  timeZone: Europe/London
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1800
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: renovate
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          priorityClassName: low-priority
+          # Keep off the GPU (ryzen) and NAS (k3s-nas) nodes — both are powered
+          # off most of the day; same shape as apps/forgejo-runner.
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: node-role.kubernetes.io/gpu
+                        operator: DoesNotExist
+                      - key: node-role.kubernetes.io/storage
+                        operator: DoesNotExist
+          imagePullSecrets:
+            - name: ghcr-pull
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 12021
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: renovate
+              # Full image, NOT -slim: node/npm must be preinstalled for npm
+              # lockfile updates. Renovate manages this tag itself via
+              # renovate.json's `kubernetes` manager.
+              image: ghcr.io/renovatebot/renovate:44.66.1
+              env:
+                - name: TZ
+                  value: Europe/London
+                - name: LOG_LEVEL
+                  value: info
+                - name: RENOVATE_CONFIG_FILE
+                  value: /config/config.json
+                # Everything Renovate writes goes under the /tmp emptyDir.
+                - name: RENOVATE_BASE_DIR
+                  value: /tmp/renovate
+                - name: RENOVATE_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: renovate-forgejo-token
+                      key: token
+                # Optional: read-only github.com PAT so changelog/release-note
+                # lookups and the github-releases datasource are not limited to
+                # 60 anonymous req/h. Created by hand — see
+                # docs/forgejo.md. Absent = warnings, not failure.
+                - name: GITHUB_COM_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: renovate-github-com
+                      key: token
+                      optional: true
+              volumeMounts:
+                - name: config
+                  mountPath: /config
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                requests:
+                  memory: 512Mi
+                  cpu: 200m
+                limits:
+                  memory: 2Gi
+                  cpu: "2"
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+                # readOnlyRootFilesystem is deliberately NOT set: the
+                # containerbase entrypoint writes inside the image filesystem.
+          volumes:
+            - name: config
+              configMap:
+                name: renovate-config
+            - name: tmp
+              emptyDir:
+                sizeLimit: 4Gi

@@ -1,0 +1,34 @@
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+    name: awtrix-basic-auth-header
+    namespace: default
+spec:
+    headers:
+        customRequestHeaders:
+            # base64("admin:<device password>"). The AWTRIX firmware gained HTTP
+            # Basic auth on 2026-08-25; without this header users get a second
+            # login prompt after SSO. Chained AFTER default-authentik-auth, whose
+            # authentik-strip-headers step clears any client-sent Authorization
+            # first — so only SSO-authenticated requests carry the device creds.
+            Authorization: ENC[AES256_GCM,data:QhtyozBR+b9eQn0kLC7QUduH2H2hHc0O+wNlnFLdX67qyA==,iv:ZzSBrpYMUii7pPk6FXgiMdTXwmTSL7Nqc2c87Q6sor0=,tag:2aX6daCGXNEI+3yar7jSMA==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age17tuhxkp7ma9xfzpsan63c94qdn4c48v6f0z5uak7updragn8ep9q0y3xfz
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSArMzRmdkcrVm9iSGdralhX
+            MTZudW5xaElyT3lSU0YzWE5OZ0E3Y25PM1dJCmVleHh5ZzBBZ1NrOXp0YzFOam5t
+            Umg0ZTFjS0Nha0YwTHA0MTNGNXRFZnMKLS0tIDhMcloybVJRS0o2M1lSVTNqclA3
+            M0Uxd0twWjBDTWd4aGRRQithK2lUZFEKCwg3UgdjuT+8sKTDTK1HA0WfnXMNj+rP
+            kAyxaYdLjYmPflIJ4oR8aLcH32G7ESnqB0BtGphMvvdoU8NaeQ52ZQ==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-08-26T10:19:33Z"
+    mac: ENC[AES256_GCM,data:nJYc6WxIA4gBqHhU7Q7r0ruD6RlXbGHFg4QAfE+tatoVjiCukhUFluEN0TPmy2KAcDMYTTnBUMRaElVqvXYyR1j68azuplczpflVkSDhLcp5OAgHhK/DCdZ2il3cbVBHYQ1BvIE5iPUeKBZmQg30OcOXhmtXgoJbv6eaCl6nAL8=,iv:DMrzVOT7pXVmrxKlIM9jsIjuhm5SyemcuzYlCZOy9PE=,tag:uvkbFbw3iii9w43LEcztGw==,type:str]
+    pgp: []
+    encrypted_regex: ^(Authorization)$
+    version: 3.9.4

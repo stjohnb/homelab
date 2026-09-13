@@ -1,0 +1,142 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authentik-server
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: authentik-server
+  template:
+    metadata:
+      labels:
+        app: authentik-server
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: critical-infrastructure
+      enableServiceLinks: false
+      containers:
+        - name: authentik
+          image: ghcr.io/goauthentik/server:2026.2.1
+          args: ["server"]
+          ports:
+            - containerPort: 9000
+              name: http
+            - containerPort: 9443
+              name: https
+            - containerPort: 9300
+              name: metrics
+          env:
+            - name: AUTHENTIK_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: AUTHENTIK_SECRET_KEY
+            - name: AUTHENTIK_BOOTSTRAP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: AUTHENTIK_BOOTSTRAP_PASSWORD
+            - name: AUTHENTIK_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: AUTHENTIK_BOOTSTRAP_TOKEN
+            - name: AUTHENTIK_POSTGRESQL__HOST
+              value: postgres
+            - name: AUTHENTIK_POSTGRESQL__USER
+              value: authentik
+            - name: AUTHENTIK_POSTGRESQL__NAME
+              value: authentik
+            - name: AUTHENTIK_POSTGRESQL__PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: PG_PASS
+            # /lifecycle/gunicorn.conf.py defaults to workers=2, threads=4 --
+            # up to 8 concurrent Django request connections. CONN_MAX_AGE is 0,
+            # so each request opens its own. One worker x the default 4 threads
+            # halves the ceiling and drops a whole process for a household-scale
+            # SSO (#1245). Do not also cut threads: every ForwardAuth check that
+            # misses the embedded outpost's cache lands here.
+            - name: AUTHENTIK_WEB__WORKERS
+              value: "1"
+            # The fan-out that took SSO down in #1256 is not a boot-only event.
+            # Every ASGI startup runs authentik/providers/proxy/apps.py
+            # proxy_set_defaults -- a @reconcile_tenant hooked to the `startup`
+            # signal -- which unconditionally re-saves all 25 ProxyProviders.
+            # Each save fires outpost_related_post_save and enqueues one
+            # outpost_send_update per outpost row, and each of those tasks opens
+            # its own AsyncConnectionPool (max_size=4, hardcoded in the vendored
+            # django_channels_postgres) held ~4.5 min on the authentik role.
+            # /lifecycle/gunicorn.conf.py hardcodes max_requests=1000 and
+            # max_requests_jitter=50 as plain literals -- NOT CONFIG.get_int, so
+            # AUTHENTIK_WEB__MAX_REQUESTS does nothing -- which recycled the
+            # single gunicorn worker every 65-70 min: 12-14 measured recycles,
+            # and 300-350 `Provider changed` lines, per 24 h. gunicorn applies
+            # GUNICORN_CMD_ARGS after the config file, so this wins: ~1 recycle
+            # a day, while keeping a memory-leak backstop. Do not use 0, and do
+            # not set this on the worker -- it runs no gunicorn. (#1267)
+            - name: GUNICORN_CMD_ARGS
+              value: "--max-requests 20000 --max-requests-jitter 2000"
+            # automountServiceAccountToken is false, so authentik's Kubernetes
+            # service connection can never work -- outpost_service_connection_monitor
+            # logs ServiceConnectionInvalid("Service token file does not exist.")
+            # on every run. Outposts here are deployed by Flux, not by authentik.
+            - name: AUTHENTIK_OUTPOSTS__DISCOVER
+              value: "false"
+          volumeMounts:
+            - name: blueprints
+              mountPath: /blueprints/custom
+            - name: dshm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1536Mi
+          # kubelet's /-/health/live/ on 9000 is answered by the Go router, not
+          # Django: internal/web/proxy.go handles it by synchronously GETting
+          # gunicorn's own /-/health/live/ (Django LiveView, no DB round-trip,
+          # User-Agent goauthentik.io/router/healthcheck) and returning 502 if
+          # that fails. With workers=1 there is no worker to answer between
+          # "Worker exiting" and "Core Worker finished starting" -- ~8 s on a
+          # measured recycle, ~6 s of it inside the 25-provider re-save above --
+          # so the default 1 s timeout fails on every recycle (this pod carries
+          # a "Liveness probe failed: context deadline exceeded" event, count 5).
+          # Under a Postgres squeeze the re-save stalls, three failures land
+          # inside 45 s and kubelet SIGTERMs the pod: the #1256 container's
+          # lastState is exitCode 0 / Completed, a kubelet kill, not a crash --
+          # seven of them in eleven minutes, each re-running the fan-out.
+          # 5 s x 8 x 15 s gives ~2 min of tolerance, which also lets the
+          # router's own 30 s-tick "restart gunicorn after three failed
+          # healthchecks" loop (needs 90 s, so it never fires first today) be
+          # the first responder: an in-place gunicorn restart instead of a pod
+          # kill. Readiness stays tight -- dropping out of the Service is the
+          # cheap, self-healing response.
+          livenessProbe:
+            httpGet:
+              path: /-/health/live/
+              port: 9000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 8
+          readinessProbe:
+            httpGet:
+              path: /-/health/ready/
+              port: 9000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: blueprints
+          configMap:
+            name: authentik-blueprints
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi

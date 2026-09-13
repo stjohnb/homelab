@@ -1,0 +1,133 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: navidrome
+  labels:
+    app: navidrome
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: navidrome
+  template:
+    metadata:
+      labels:
+        app: navidrome
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: low-priority
+      enableServiceLinks: false
+      # Read tier (#800): Navidrome only reads media, so it runs on the
+      # always-on k3s node against the soft NFS mount, like Plex and Jellyfin.
+      # Its DB (playlists, play counts, favourites) is node-local, so the UI,
+      # library browsing and client-cached playback stay up while the NAS
+      # sleeps. Do NOT pin it to k3s-nas. See docs/nas-app-tier-migration.md.
+      containers:
+        - name: navidrome
+          image: deluan/navidrome:0.63.2
+          env:
+            - name: TZ
+              value: "Europe/London"
+            - name: ND_MUSICFOLDER
+              value: /media/Music
+            - name: ND_DATAFOLDER
+              value: /data
+            - name: ND_CACHEFOLDER
+              value: /data/cache
+            - name: ND_PORT
+              value: "4533"
+            - name: ND_LOGLEVEL
+              value: info
+            # Telemetry ("insights") defaults to true and phones home.
+            - name: ND_ENABLEINSIGHTSCOLLECTOR
+              value: "false"
+            # Scheduled scans stay off, same reasoning as Plex's and Jellyfin's
+            # disabled scanners: a scan while the NAS sleeps walks an EIO'd
+            # tree. Rescan after adding music via the admin UI's Quick Scan
+            # button, or by restarting the pod (ScanOnStartup defaults true).
+            - name: ND_SCANNER_SCHEDULE
+              value: "0"
+            # Load-bearing: files that read as missing are flagged, never
+            # deleted from the DB, so playlists and play counts survive a scan
+            # that ran against an unreachable NAS.
+            - name: ND_SCANNER_PURGEMISSING
+              value: "never"
+            # SSO (#962). Authentik ForwardAuth on the catch-all router injects
+            # X-authentik-username; Navidrome trusts it only when the request's
+            # TCP peer is in TrustedSources. That peer is the Traefik *pod* IP,
+            # so the value must be the k3s pod CIDR — not the LAN subnet, and
+            # not a literal pod IP (it changes on every reschedule).
+            # 10.42.0.0/16 trusts every pod, so networkpolicy.yaml is the real
+            # anti-spoofing control. Do not widen either without the other.
+            - name: ND_EXTAUTH_TRUSTEDSOURCES
+              value: "10.42.0.0/16"
+            - name: ND_EXTAUTH_USERHEADER
+              value: "X-authentik-username"
+            # UI logout ends the shared Authentik session, so it signs the user
+            # out of every ForwardAuth-protected app, not just Navidrome.
+            - name: ND_EXTAUTH_LOGOUTURL
+              value: "https://auth.home.bstjohn.net/flows/-/default/invalidation/"
+          ports:
+            - name: http
+              containerPort: 4533
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: media
+              mountPath: /media
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 2Gi
+              cpu: 2000m
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: 4533
+            periodSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 4533
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 4533
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        fsGroup: 1000
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: navidrome-data-pvc
+        # media-soft-pvc, NOT media-pvc — apps/servarr/shared-pvcs.yaml:63.
+        # Reference the existing claim; do not create a new PV/PVC.
+        - name: media
+          persistentVolumeClaim:
+            claimName: media-soft-pvc
+        - name: tmp
+          emptyDir: {}
+      restartPolicy: Always

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    app: vaultwarden
+  name: vaultwarden-data
+  annotations:
+    # Retained after decommission (#916) so merging cannot destroy the vault.
+    # Operator deletes this PVC by hand once the contents are extracted.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  storageClassName: local-path
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi

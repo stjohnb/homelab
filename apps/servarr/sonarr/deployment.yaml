@@ -1,0 +1,243 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sonarr
+  labels:
+    app: sonarr
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sonarr
+  template:
+    metadata:
+      labels:
+        app: sonarr
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: low-priority
+      enableServiceLinks: false
+      # Pinned to the storage node (k3s-nas). The NAS is powered off most of
+      # the time and this service is pointless without its media, so it must
+      # fail cleanly here rather than run without storage. See docs/nas-k3s.md.
+      nodeSelector:
+        node-role.kubernetes.io/storage: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/storage
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      initContainers:
+        - name: set-external-auth
+          image: busybox:1.37
+          command: ["sh", "-c"]
+          env:
+            - name: APIKEY
+              valueFrom:
+                secretKeyRef:
+                  name: servarr-apikeys
+                  key: sonarr-api-key
+          args:
+            - |
+              set -e
+              CONFIG=/config/config.xml
+              # NOTE: On fresh install, config does not exist yet. The patch
+              # is a no-op on first boot; auth is disabled on the next restart.
+              # An empty file means an ungraceful shutdown truncated the config;
+              # remove it so the app regenerates a valid one on startup.
+              if [ -f "$CONFIG" ] && [ ! -s "$CONFIG" ]; then
+                rm -f "$CONFIG"
+              fi
+              if [ -s "$CONFIG" ]; then
+                if grep -q '<AuthenticationMethod>' "$CONFIG"; then
+                  sed -i 's|<AuthenticationMethod>.*</AuthenticationMethod>|<AuthenticationMethod>External</AuthenticationMethod>|' "$CONFIG"
+                else
+                  sed -i 's|</Config>|  <AuthenticationMethod>External</AuthenticationMethod>\n</Config>|' "$CONFIG"
+                fi
+                if grep -q '<AuthenticationRequired>' "$CONFIG"; then
+                  sed -i 's|<AuthenticationRequired>.*</AuthenticationRequired>|<AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>|' "$CONFIG"
+                else
+                  sed -i 's|</Config>|  <AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>\n</Config>|' "$CONFIG"
+                fi
+                if grep -q '<ApiKey>' "$CONFIG"; then
+                  sed -i "s|<ApiKey>.*</ApiKey>|<ApiKey>${APIKEY}</ApiKey>|" "$CONFIG"
+                else
+                  sed -i "s|</Config>|  <ApiKey>${APIKEY}</ApiKey>\n</Config>|" "$CONFIG"
+                fi
+              fi
+          volumeMounts:
+            - name: sonarr-config
+              mountPath: /config
+        # Regression guard for #727/#1072. st_dev equality is NOT sufficient:
+        # link(2) requires the same *vfsmount*, and each volumeMounts entry is
+        # its own bind mount. This probe does the real thing — create a file
+        # under downloads and hardlink it into the library — so it fails the
+        # pod whenever hardlinking regresses, however it regresses.
+        - name: assert-hardlink
+          image: busybox:1.37
+          # Runs as 1000:1000 (matching PUID/PGID) so probe files are owned
+          # the same way as everything else Sonarr writes.
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          command: ["sh", "-c"]
+          args:
+            - |
+              SRC=/data/downloads/.hardlink-probe-sonarr
+              DST=/data/media/TV/.hardlink-probe-sonarr
+              rm -f "$SRC" "$DST"
+              if ! echo probe > "$SRC"; then
+                echo "FATAL: cannot write $SRC" >&2
+                exit 1
+              fi
+              if ! LN_ERR=$(ln "$SRC" "$DST" 2>&1); then
+                rm -f "$SRC"
+                echo "FATAL: hardlink /data/downloads -> /data/media/TV failed: $LN_ERR. Sonarr would silently full-copy every import. See issue #1072." >&2
+                exit 1
+              fi
+              N=$(stat -c %h "$DST")
+              rm -f "$SRC" "$DST"
+              if [ "$N" != "2" ]; then
+                echo "FATAL: link created but nlink=$N (expected 2)." >&2
+                exit 1
+              fi
+              echo "ok: hardlink downloads -> media/TV works (nlink 2)"
+          volumeMounts:
+            - name: ssdpool
+              mountPath: /data
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 64Mi
+              cpu: 100m
+      containers:
+        - name: sonarr
+          image: linuxserver/sonarr:4.0.17
+          # /tv and /downloads are symlinks into the single /data mount, not
+          # separate volumeMounts. Two mounts of the same NFS export are two
+          # vfsmounts, and link(2) refuses to cross a vfsmount boundary even
+          # when st_dev matches — that is why #1070 did not fix #727 (#1072).
+          # Symlinks are resolved before the vfsmount check, so hardlinking
+          # works while the container paths baked into Sonarr's database
+          # (67 series rooted at /tv) stay exactly as they are.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              for pair in "/tv:/data/media/TV" "/downloads:/data/downloads"; do
+                link=${pair%%:*}
+                target=${pair##*:}
+                if [ -L "$link" ]; then
+                  rm -f "$link"
+                elif [ -d "$link" ]; then
+                  # rmdir refuses non-empty dirs and mount points, so this can
+                  # only clear an empty dir an image bump introduced.
+                  rmdir "$link" || {
+                    echo "FATAL: $link is a non-empty directory or a live mount — refusing to touch it." >&2
+                    exit 1
+                  }
+                elif [ -e "$link" ]; then
+                  echo "FATAL: $link exists and is not a symlink or empty dir. Refusing to touch it." >&2
+                  exit 1
+                fi
+                ln -s "$target" "$link"
+              done
+              exec /init
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: "Europe/London"
+          ports:
+            - name: http
+              containerPort: 8989
+              protocol: TCP
+          volumeMounts:
+            - name: sonarr-config
+              mountPath: /config
+            - name: ssdpool
+              mountPath: /data
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 1Gi
+              cpu: 2000m
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 8989
+            periodSeconds: 60
+            timeoutSeconds: 15
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: 8989
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 8989
+            periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 3
+        # Self-heal sidecar: Sonarr's root folder and download client live in
+        # its database, which is NOT GitOps-managed. An ungraceful shutdown can
+        # reset the DB, losing both with nothing to restore them (Prowlarr
+        # re-syncs indexers, but not these). Without a root folder every
+        # Overseerr push fails; without the download client nothing downloads.
+        # This sidecar reconciles both from the API. Both POSTs are idempotent
+        # (skipped when already present), so it is a no-op in steady state.
+        # It also reconciles removeCompletedDownloads/removeFailedDownloads on an existing client — see issue #728.
+        # The reconcile loop itself is shared with Radarr — see apps/servarr/reconcile-config.sh.
+        - name: config-reconciler
+          image: curlimages/curl:8.21.0
+          command: ["/bin/sh", "/scripts/reconcile.sh"]
+          env:
+            - name: API_PORT
+              value: "8989"
+            - name: ROOT_FOLDER
+              value: /tv
+            - name: CATEGORY_FIELD
+              value: tvCategory
+            - name: CATEGORY_VALUE
+              value: tv-sonarr
+            - name: APIKEY
+              valueFrom:
+                secretKeyRef:
+                  name: servarr-apikeys
+                  key: sonarr-api-key
+          volumeMounts:
+            - name: reconciler-script
+              mountPath: /scripts
+              readOnly: true
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 64Mi
+              cpu: 100m
+
+      volumes:
+        - name: sonarr-config
+          persistentVolumeClaim:
+            claimName: sonarr-local-config-pvc
+        - name: ssdpool
+          persistentVolumeClaim:
+            claimName: ssdpool-pvc
+        - name: reconciler-script
+          configMap:
+            name: servarr-reconciler-script
+            defaultMode: 0555
+
+      restartPolicy: Always

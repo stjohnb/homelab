@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pve-exporter
+  namespace: default
+  labels:
+    app: pve-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pve-exporter
+  template:
+    metadata:
+      labels:
+        app: pve-exporter
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: low-priority
+      enableServiceLinks: false
+      containers:
+        - name: pve-exporter
+          image: prompve/prometheus-pve-exporter:3.8.1
+          ports:
+            - containerPort: 9221
+          env:
+            - name: PVE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: pve-exporter-secret
+                  key: pve-user
+            - name: PVE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pve-exporter-secret
+                  key: pve-password
+            - name: PVE_VERIFY_SSL
+              value: "true"
+            # PVE_VERIFY_SSL is coerced to a bool by the exporter, so the CA
+            # path has to come from requests' own env var. proxmoxer passes
+            # verify=True per request and requests then substitutes
+            # REQUESTS_CA_BUNDLE for it.
+            - name: REQUESTS_CA_BUNDLE
+              value: /etc/pve-ca/tls.ca
+          volumeMounts:
+            - name: pve-root-ca
+              mountPath: /etc/pve-ca
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 9221
+            periodSeconds: 15
+          startupProbe:
+            httpGet:
+              path: /
+              port: 9221
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 9221
+            periodSeconds: 10
+      volumes:
+        - name: pve-root-ca
+          secret:
+            secretName: proxmox-root-ca

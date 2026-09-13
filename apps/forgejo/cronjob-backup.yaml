@@ -1,0 +1,158 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: forgejo-backup
+  labels:
+    app: forgejo
+spec:
+  schedule: "30 2 * * *"
+  timeZone: Europe/London
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # See apps/unifi/cronjob-backup.yaml: 48h so a fixed failure stops re-alerting.
+      ttlSecondsAfterFinished: 172800
+      activeDeadlineSeconds: 900
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: forgejo
+            component: backup
+        spec:
+          # No nodeSelector: mounting the forgejo-data local-path PVC pins this
+          # pod to node k3s implicitly via the PV's node affinity. No NFS mount,
+          # so this job has no dependency on the storage node being powered on.
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          restartPolicy: Never
+          securityContext:
+            fsGroup: 1000
+          imagePullSecrets:
+            - name: registry-pull
+          containers:
+            - name: dump
+              # Must stay identical to apps/forgejo/deployment.yaml so both
+              # move together, and so `forgejo dump` speaks the same DB
+              # schema as the server (a 14.0.3 dump against a 15.x-migrated DB
+              # fails: "no such column: remote_address").
+              # Enforced by scripts/check-image-tag-consistency.sh.
+              image: registry.home.bstjohn.net/st-john-software/forgejo:15.0.7-dc847b3-rootless
+              securityContext:
+                runAsUser: 1000
+                runAsGroup: 1000
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              # No FORGEJO__database__* here: `command:` overrides the image
+              # entrypoint, so environment-to-ini never runs. This container
+              # reads the DB config from app.ini on the shared forgejo-data PVC,
+              # which the server rewrites from its env on every start (#1216).
+              # It therefore reaches postgres over the pod network — this pod's
+              # `app: forgejo` label is on the allow-list in
+              # apps/postgres/networkpolicy.yaml.
+              env:
+                - name: TZ
+                  value: Europe/London
+                - name: GITEA_WORK_DIR
+                  value: /var/lib/gitea
+                - name: GITEA_CUSTOM
+                  value: /var/lib/gitea/custom
+                - name: GITEA_APP_INI
+                  value: /var/lib/gitea/custom/conf/app.ini
+                - name: HOME
+                  value: /var/lib/gitea/git
+                - name: TMPDIR
+                  value: /dump-tmp
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  DEST=/backups
+                  STAGE="${DEST}/.staging"
+                  TS="$(date +%Y%m%d-%H%M%S)"
+                  FINAL="${DEST}/forgejo-dump-${TS}.tar.gz"
+
+                  # Sweep orphans >24h old. Pattern is deliberately broad: before
+                  # this fix every dump landed as .forgejo-dump-*.partial.tar.gz
+                  # and the old '.partial'-suffixed pattern never matched them.
+                  find "${DEST}" -maxdepth 1 -type f -name '.forgejo-dump-*' -mmin +1440 -exec rm -v {} \; || true
+
+                  # forgejo dump rewrites --file to end in the --type suffix, so
+                  # the file it produces is NOT necessarily the path passed in.
+                  # Dump into an empty staging dir and take whatever appears.
+                  rm -rf "${STAGE}"
+                  mkdir -p "${STAGE}"
+                  echo "Dumping into ${STAGE}..."
+                  # The database is on apps/postgres (#1216). A brand-new pod's first
+                  # connection to it is rejected for roughly a second while k3s's
+                  # network-policy controller adds the pod's IP to the postgres ingress
+                  # allow-list; the server retries its ORM init ten times, but
+                  # `forgejo dump` connects once and dies. Wait for the port first
+                  # (bounded, so a genuinely down database still fails loudly).
+                  DB_HOST=$(sed -n '/^\[database\]/,/^\[/{s/^HOST *= *//p}' "${GITEA_APP_INI}" | head -n 1)
+                  DB_HOST="${DB_HOST:-postgres.default.svc.cluster.local:5432}"
+                  n=0
+                  until nc -z -w 2 "${DB_HOST%%:*}" "${DB_HOST##*:}" 2>/dev/null; do
+                    n=$((n + 1))
+                    if [ "$n" -ge 30 ]; then echo "FATAL: ${DB_HOST} not reachable after ${n} attempts"; exit 1; fi
+                    sleep 1
+                  done
+                  forgejo dump --type tar.gz --file "${STAGE}/dump.tar.gz" --tempdir /dump-tmp --quiet
+
+                  PARTIAL="$(find "${STAGE}" -maxdepth 1 -type f -name 'dump*' | head -n 1)"
+                  if [ -z "${PARTIAL}" ]; then
+                    echo "FATAL: forgejo dump exited 0 but produced no file in ${STAGE}"
+                    rm -rf "${STAGE}"; exit 1
+                  fi
+                  echo "Produced $(basename "${PARTIAL}")"
+
+                  # Verify CONTENT, not exit status. An empty forge yields a ~74 KB
+                  # forgejo-db.sql; under 20 KB means the DB dump did not happen.
+                  DBSIZE="$(tar -tvzf "${PARTIAL}" | awk '$NF == "forgejo-db.sql" { print $3 }')"
+                  if [ -z "${DBSIZE}" ]; then
+                    echo "FATAL: archive contains no forgejo-db.sql"; rm -rf "${STAGE}"; exit 1
+                  fi
+                  if [ "${DBSIZE}" -lt 20480 ]; then
+                    echo "FATAL: forgejo-db.sql is only ${DBSIZE} bytes"; rm -rf "${STAGE}"; exit 1
+                  fi
+                  if ! tar -tzf "${PARTIAL}" | grep -qx 'data/custom/conf/app.ini'; then
+                    echo "FATAL: archive is missing data/custom/conf/app.ini"; rm -rf "${STAGE}"; exit 1
+                  fi
+
+                  chmod 0640 "${PARTIAL}"
+                  mv "${PARTIAL}" "${FINAL}"
+                  rm -rf "${STAGE}"
+                  echo "Backup complete: ${FINAL} ($(du -h "${FINAL}" | cut -f1), forgejo-db.sql=${DBSIZE} bytes)"
+
+                  cd "${DEST}"
+                  ls -t forgejo-dump-*.tar.gz | tail -n +15 | xargs -r rm -v
+                  echo "Local backups:"; ls -lht forgejo-dump-*.tar.gz
+              volumeMounts:
+                - name: forgejo-data
+                  mountPath: /var/lib/gitea
+                - name: backups
+                  mountPath: /backups
+                - name: dump-tmp
+                  mountPath: /dump-tmp
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 1000m
+                  memory: 1Gi
+          volumes:
+            - name: forgejo-data
+              persistentVolumeClaim:
+                claimName: forgejo-data
+            - name: backups
+              persistentVolumeClaim:
+                claimName: forgejo-backups
+            - name: dump-tmp
+              emptyDir:
+                sizeLimit: 4Gi

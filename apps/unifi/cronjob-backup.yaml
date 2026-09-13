@@ -1,0 +1,132 @@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: unifi-backup
+  labels:
+    app: unifi
+spec:
+  # 02:15. The NAS is woken by Home Assistant at 02:00 (magic packet, ~2-3
+  # minutes to Ready) and powers itself off at 03:03 Europe/London
+  # (nixos-config systemd.timers.nightly-shutdown) — see nixos-config
+  # docs/nas-duty-cycle.md. This Job writes to the hard-mounted media-pvc, so
+  # it must run inside that ~02:03-03:03 window; its old 00:30 schedule was
+  # picked from a stale "no scheduled wake" claim and failed on every night
+  # nobody woke the box by hand. 02:15 + the 1200s deadline is done by 02:35,
+  # after config-backup (02:00) and config-backup-players (02:05) and clear of
+  # postgres-db-backup (02:30, other node) and forgejo-backup-offsite (03:00).
+  schedule: "15 2 * * *"
+  timeZone: Europe/London
+  concurrencyPolicy: Forbid
+  # Skip a slot missed by more than 10 minutes instead of firing it late. With
+  # this unset, the controller fires the most recent missed schedule the moment
+  # the CronJob is edited: when PR #1277 landed the 02:15 schedule at 11:31 UTC
+  # on 2026-09-10 it immediately created unifi-backup-29816715 for the already
+  # passed 01:15 UTC slot, mid-day, in the same second as a manual verification
+  # run — two logins at once, and the console 503'd one of them (#1280). A late
+  # run is worthless anyway: this Job needs the NAS, which is only awake
+  # 02:03-03:03 Europe/London.
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      # Finished Jobs self-delete after 48h. Without it, failedJobsHistoryLimit
+      # keeps a Failed Job — and its Failed pod — until the *next* failure
+      # replaces it, which for a fixed nightly job is never, so the Claws
+      # workload watcher keeps re-filing "[k3s] Workload failing" issues for a
+      # problem already fixed (#1211/#1217/#1228/#1236, one pod, four issues).
+      # 48h, not minutes: the *-job-failed Grafana rules read
+      # kube_job_status_failed, whose series vanishes with the Job object, and
+      # containerd-gc-storage-job-failed cannot even evaluate until k3s-nas has
+      # been Ready for 26h. Never use failedJobsHistoryLimit: 0 instead — that
+      # takes the alert and the logs with it. See docs/config-backups.md.
+      ttlSecondsAfterFinished: 172800
+      activeDeadlineSeconds: 1200
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: unifi
+            component: unifi-backup
+            claws.st-john-software.com/nfs-dependent: "true"
+        spec:
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          restartPolicy: Never
+          priorityClassName: low-priority
+          nodeSelector:
+            node-role.kubernetes.io/storage: "true"
+          tolerations:
+            - key: node-role.kubernetes.io/storage
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          initContainers:
+            - name: init-backup-dir
+              image: busybox:1.37
+              command: ["sh", "-c", "mkdir -p /media/backups/unifi && chown 1000:1000 /media/backups/unifi"]
+              securityContext:
+                runAsUser: 0
+              volumeMounts:
+                - name: media
+                  mountPath: /media
+          containers:
+            - name: backup
+              image: curlimages/curl:8.21.0
+              command: ["/bin/sh", "/scripts/backup.sh"]
+              env:
+                # Direct LAN IP, not unifi.home.bstjohn.net: the ingress path
+                # would add a Traefik dependency to a job that only needs the
+                # console. Matches apps/unifi/endpoints.yaml.
+                - name: UNIFI_URL
+                  value: "https://192.168.0.1"
+                # A settings-only .unf is typically 50-200 KB. Anything under
+                # this is an error page or a truncated transfer.
+                - name: MIN_BYTES
+                  value: "20000"
+                - name: UNIFI_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: unifi-backup-credentials
+                      key: username
+                - name: UNIFI_PASS
+                  valueFrom:
+                    secretKeyRef:
+                      name: unifi-backup-credentials
+                      key: password
+              securityContext:
+                runAsUser: 1000
+                runAsGroup: 1000
+                runAsNonRoot: true
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                seccompProfile:
+                  type: RuntimeDefault
+              resources:
+                requests:
+                  memory: 32Mi
+                  cpu: 10m
+                limits:
+                  memory: 128Mi
+                  cpu: 500m
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: media
+                  mountPath: /media
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: scripts
+              configMap:
+                name: unifi-backup-script
+                defaultMode: 0555
+            - name: media
+              persistentVolumeClaim:
+                claimName: media-pvc
+            - name: tmp
+              emptyDir: {}

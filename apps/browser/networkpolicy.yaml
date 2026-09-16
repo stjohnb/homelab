@@ -1,0 +1,42 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: browser-ingress-restricted
+  labels:
+    app: browser
+spec:
+  podSelector:
+    matchLabels:
+      app: browser
+  policyTypes:
+    - Ingress
+  # Applying this policy makes the browser pod default-deny on the pod
+  # network. A new consumer MUST be added to the allow-list below or its
+  # connections will silently time out.
+  ingress:
+    # A bare podSelector means the same namespace (default).
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [claws-staging, growth-engine]
+      ports:
+        - protocol: TCP
+          port: 3000
+    # A single from-peer combining namespaceSelector AND podSelector: two
+    # separate list items would be an OR and admit any pod in claws-sessions
+    # or any claws-workload: session pod in any namespace. These are the
+    # per-session pods Claws launches, which run the Playwright MCP.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: claws-sessions
+          podSelector:
+            matchLabels:
+              claws-workload: session
+      ports:
+        - protocol: TCP
+          port: 3000
+  # Egress is deliberately unrestricted: the browser has to reach the
+  # internet to render pages.

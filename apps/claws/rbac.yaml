@@ -1,0 +1,39 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: claws-staging
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: claws-staging-auth
+  namespace: default
+rules:
+  # Provider credentials rotate (Codex rewrites its ChatGPT refresh token in
+  # ~/.codex/auth.json; Claude refreshes its OAuth token), and the container
+  # entrypoint rebuilds those files from the Secret on every boot. Rather than
+  # a PR per rotation, the pod writes the new value back into `claws-auth`
+  # itself. Scoped by resourceNames to that one Secret: it must NOT be able to
+  # read or rewrite `claws-config` (SSH key, kubeconfig) or `authentik-secrets`.
+  # `get` is required as well as `patch` — a read-modify-write of .data issues
+  # a GET first, and a 403 there fails before the patch is attempted.
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [claws-auth]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: claws-staging-auth
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: claws-staging-auth
+subjects:
+  - kind: ServiceAccount
+    name: claws-staging
+    namespace: default

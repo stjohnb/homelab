@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - flux-system
+  - infrastructure-kustomization.yaml
+  - config-kustomization.yaml
+  - tofu-kustomization.yaml
+  - migrations-kustomization.yaml
+  - apps-kustomization.yaml
+  - claws-sessions-kustomization.yaml
+  - claws-staging-prepull-kustomization.yaml
+  - claws-staging-kustomization.yaml

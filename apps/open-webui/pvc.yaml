@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    app: open-webui
+  name: open-webui-data
+  namespace: default
+  annotations:
+    # Retained after decommission (#916) so merging cannot destroy the data.
+    # Operator deletes this PVC by hand once confirmed unneeded.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  storageClassName: local-path
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi

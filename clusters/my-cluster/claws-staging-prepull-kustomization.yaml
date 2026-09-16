@@ -1,0 +1,22 @@
+---
+# First half of the claws-staging pre-pull chain (#1373). `wait: true` means
+# this Kustomization only records a revision as applied once the pre-pull
+# Deployment is Ready on the new tag; `claws-staging` depends on that. A bad
+# or pruned tag fails the health check here and holds the StatefulSet on its
+# old, working image. Never add `apps` to either side of this chain.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: claws-staging-prepull
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 30s
+  path: ./clusters/my-cluster/claws-staging-prepull
+  prune: true
+  wait: true
+  timeout: 5m
+  targetNamespace: default
+  sourceRef:
+    kind: GitRepository
+    name: flux-system

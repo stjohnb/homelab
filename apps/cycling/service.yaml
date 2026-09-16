@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: cycling
+  labels:
+    app: cycling
+spec:
+  type: ClusterIP
+  selector:
+    app: cycling
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http

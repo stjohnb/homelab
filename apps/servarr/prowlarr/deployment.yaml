@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prowlarr
+  labels:
+    app: prowlarr
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: prowlarr
+  template:
+    metadata:
+      labels:
+        app: prowlarr
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: low-priority
+      enableServiceLinks: false
+      initContainers:
+        - name: set-external-auth
+          image: busybox:1.37
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              CONFIG=/config/config.xml
+              # NOTE: On fresh install, config does not exist yet. The patch
+              # is a no-op on first boot; auth is disabled on the next restart.
+              # An empty file means an ungraceful shutdown truncated the config;
+              # remove it so the app regenerates a valid one on startup.
+              if [ -f "$CONFIG" ] && [ ! -s "$CONFIG" ]; then
+                rm -f "$CONFIG"
+              fi
+              if [ -s "$CONFIG" ]; then
+                if grep -q '<AuthenticationMethod>' "$CONFIG"; then
+                  sed -i 's|<AuthenticationMethod>.*</AuthenticationMethod>|<AuthenticationMethod>External</AuthenticationMethod>|' "$CONFIG"
+                else
+                  sed -i 's|</Config>|  <AuthenticationMethod>External</AuthenticationMethod>\n</Config>|' "$CONFIG"
+                fi
+                if grep -q '<AuthenticationRequired>' "$CONFIG"; then
+                  sed -i 's|<AuthenticationRequired>.*</AuthenticationRequired>|<AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>|' "$CONFIG"
+                else
+                  sed -i 's|</Config>|  <AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>\n</Config>|' "$CONFIG"
+                fi
+              fi
+          volumeMounts:
+            - name: prowlarr-config
+              mountPath: /config
+      containers:
+        - name: prowlarr
+          image: linuxserver/prowlarr:2.3.0
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: "Europe/London"
+          ports:
+            - name: http
+              containerPort: 9696
+              protocol: TCP
+          volumeMounts:
+            - name: prowlarr-config
+              mountPath: /config
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 50m
+            limits:
+              memory: 512Mi
+              cpu: 1000m
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 9696
+            periodSeconds: 30
+            timeoutSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: 9696
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 9696
+            periodSeconds: 10
+            timeoutSeconds: 5
+
+      volumes:
+        - name: prowlarr-config
+          persistentVolumeClaim:
+            claimName: prowlarr-local-config-pvc
+
+      restartPolicy: Always

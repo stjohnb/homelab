@@ -1,0 +1,149 @@
+---
+name: Update forgejo image
+
+# Dispatched by St-John-Software/forgejo's .forgejo/workflows/build-image.yml
+# on git.home.bstjohn.net after it pushes a new image to zot, authorized by
+# the org-level FLEET_INFRA_VERSION_BUMP PAT.
+
+# Triggers removed for the public snapshot — this workflow is intentionally disabled.
+# See the private source repository for the active version.
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: forgejo-update
+  cancel-in-progress: false
+
+# sed/git for the tag bump come from this repo's flake.nix `scripts` devShell
+# (mkShell's stdenv provides sed and the coreutils) via the job-level default
+# shell — the self-hosted NixOS runners provide only nix/git/docker. The
+# preflight step runs before checkout, so no flake exists yet: it overrides
+# the default shell with plain bash and uses only bash builtins.
+jobs:
+  update:
+    runs-on: [self-hosted, linux]
+    defaults:
+      run:
+        shell: nix --extra-experimental-features nix-command --extra-experimental-features flakes develop ${{ github.workspace }}#scripts --command bash -euo pipefail {0}
+    steps:
+      - name: Preflight — require FLEET_INFRA_VERSION_BUMP
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.FLEET_INFRA_VERSION_BUMP }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN}" ]; then
+            echo "::error::FLEET_INFRA_VERSION_BUMP is missing or empty." \
+              "Recreate the org-level fine-grained PAT — see docs/infrastructure-overview.md."
+            exit 1
+          fi
+
+      # PAT checkout (not GITHUB_TOKEN) so the bump branch push and PR are authored
+      # by a real user account — GITHUB_TOKEN-authored PRs do not trigger
+      # pull_request workflows, so ci.yml would never run on the bump branch and
+      # Claws' auto-merger would skip the PR (it requires passing checks).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          token: ${{ secrets.FLEET_INFRA_VERSION_BUMP }}
+          fetch-depth: 0
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Validate tag
+        env:
+          NEW_TAG: ${{ inputs.tag }}
+        run: |
+          [[ "${NEW_TAG}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{7,12}-rootless$ ]] \
+            || { echo "Invalid tag format: ${NEW_TAG} (expected <upstream-version>-<short sha>-rootless)"; exit 1; }
+
+      # Cheap, tag-only guard against opening a PR that moves Forgejo backwards.
+      # It cannot order two builds of the same upstream version — see the
+      # Upgrade Runbook in docs/forgejo.md for that gap.
+      - name: Refuse downgrade
+        env:
+          NEW_TAG: ${{ inputs.tag }}
+        run: |
+          IMG=registry.home.bstjohn.net/st-john-software/forgejo
+          CUR_TAG="$(grep -o "${IMG}:[^ ]*" apps/forgejo/deployment.yaml | head -n1 | sed "s|${IMG}:||")"
+
+          if [ "${CUR_TAG}" = "${NEW_TAG}" ]; then
+            exit 0
+          fi
+
+          NEW_UP="${NEW_TAG%%-*}"
+          CUR_UP="${CUR_TAG%%-*}"
+          if [ "${NEW_UP}" != "${CUR_UP}" ]; then
+            OLDEST="$(printf '%s\n' "${NEW_UP}" "${CUR_UP}" | sort -V | head -n1)"
+            if [ "${OLDEST}" = "${NEW_UP}" ]; then
+              echo "::error::Dispatched tag ${NEW_TAG} is a downgrade from the current tag ${CUR_TAG} (upstream ${NEW_UP} < ${CUR_UP})."
+              exit 1
+            fi
+          fi
+
+          SUPERSEDED="$(git log --format='%h %s' -S "forgejo:${NEW_TAG}" -- apps/forgejo/deployment.yaml)"
+          if [ -n "${SUPERSEDED}" ]; then
+            echo "::error::Dispatched tag ${NEW_TAG} was already deployed before and has since been replaced. Matching commits:"
+            echo "${SUPERSEDED}"
+            exit 1
+          fi
+
+      - name: Update image tag
+        id: update-tag
+        env:
+          NEW_TAG: ${{ inputs.tag }}
+        run: |
+          IMG=registry.home.bstjohn.net/st-john-software/forgejo
+          FILES=(apps/forgejo/deployment.yaml apps/forgejo/cronjob-backup.yaml)
+          for f in "${FILES[@]}"; do
+            grep -q "${IMG}:" "$f" || { echo "::error::${f} no longer references ${IMG}"; exit 1; }
+            sed -i "s|${IMG}:[^ ]*|${IMG}:${NEW_TAG}|" "$f"
+            grep -q "${IMG}:${NEW_TAG}" "$f" || { echo "::error::failed to bump ${f}"; exit 1; }
+          done
+          if git diff --quiet "${FILES[@]}"; then
+            echo "Image already at ${NEW_TAG}, nothing to do."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # This PR carries auto-bump like the other update-*.yml receivers: Claws
+      # merges it unattended once ci.yml is green and its review of the
+      # current commit is clean. The Recreate rollout's one-way DB migration
+      # is covered by the nightly Stage 1 forgejo-backup dump (02:30
+      # Europe/London) plus postgres-db-backup (02:30) — see "Manual runs" in
+      # docs/forgejo-backups.md to take a fresh Stage 1 backup on demand.
+      # Release-notes review and any startupProbe.failureThreshold widening
+      # happen earlier, on the UPSTREAM_VERSION PR in St-John-Software/forgejo,
+      # which still has a human reviewer. The "Refuse downgrade" step above
+      # cannot order two builds of the same upstream version. See the Upgrade
+      # Runbook in docs/forgejo.md.
+      - name: Open pull request
+        if: steps.update-tag.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
+        with:
+          token: ${{ secrets.FLEET_INFRA_VERSION_BUMP }}
+          branch: automation/bump-forgejo-${{ inputs.tag }}
+          delete-branch: true
+          commit-message: "chore(forgejo): update image to ${{ inputs.tag }}"
+          title: "chore(forgejo): update image to ${{ inputs.tag }}"
+          body: |
+            Automated image update — new forgejo release from St-John-Software/forgejo.
+
+            Bumps both `apps/forgejo/deployment.yaml` and
+            `apps/forgejo/cronjob-backup.yaml` together — they must always run the
+            same binary, since `forgejo dump` reads the database with the schema
+            its own binary expects.
+
+            This PR merges unattended via Claws once CI is green and its review is
+            clean. The restore point for the Recreate rollout's one-way DB migration
+            is the latest nightly Stage 1 `forgejo-backup` dump (02:30 Europe/London).
+
+            Remove the `auto-bump` label to hold this PR for a human, e.g. to take a
+            fresh Stage 1 backup first or if this is an older build than main runs.
+
+            Triggered by @${{ github.event.sender.login }} via run ${{ github.run_id }}.
+          labels: dependencies,auto-bump

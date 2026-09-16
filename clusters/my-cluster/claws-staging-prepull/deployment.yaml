@@ -1,0 +1,63 @@
+---
+# Pre-pulls the claws image onto node k3s before the claws-staging
+# StatefulSet rolls (#1373). Its Flux Kustomization `claws-staging-prepull`
+# has `wait: true`, so it only records a new revision once this pod is Ready
+# on the new tag, and the `claws-staging` Kustomization `dependsOn` it — the
+# StatefulSet therefore restarts from a cached image instead of stopping
+# first and then pulling ~966MB. Do not move this into apps/: the ordering
+# needs its own Kustomization, and putting `apps` in the chain would let one
+# bad claws tag stall every app. The image tag must match
+# clusters/my-cluster/claws-staging/statefulset.yaml (CI enforces it).
+#
+# The running pod also keeps the image "in use", which protects it from
+# kubelet image GC and containerd-gc pruning of unused images.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claws-staging-prepull
+  namespace: default
+  labels:
+    app: claws-staging-prepull
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: claws-staging-prepull
+  template:
+    metadata:
+      labels:
+        app: claws-staging-prepull
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: k3s
+      imagePullSecrets:
+        - name: ghcr-pull
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 1
+      priorityClassName: standard
+      containers:
+        - name: prepull
+          image: ghcr.io/st-john-software/claws:v2026-09-15.18
+          command: ["sleep", "infinity"]
+          resources:
+            requests:
+              cpu: 1m
+              memory: 8Mi
+            limits:
+              cpu: 10m
+              memory: 16Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault

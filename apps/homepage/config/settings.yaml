@@ -1,0 +1,20 @@
+title: Home
+
+theme: dark
+color: slate
+cardBlur: xs
+statusStyle: dot
+
+layout:
+  Apps:
+    style: row
+    columns: 3
+  Home Automation:
+    style: row
+    columns: 3
+  Servarr:
+    style: row
+    columns: 3
+  Infrastructure:
+    style: row
+    columns: 3

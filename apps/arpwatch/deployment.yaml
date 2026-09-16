@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arpwatch
+  labels:
+    app: arpwatch
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: arpwatch
+  template:
+    metadata:
+      labels:
+        app: arpwatch
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: low-priority
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      enableServiceLinks: false
+      imagePullSecrets:
+        - name: registry-pull
+      containers:
+        - name: arpwatch
+          image: registry.home.bstjohn.net/st-john-software/arpwatch:v2026-08-27.2
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              touch /data/arp.dat &&
+              exec arpwatch -i ens18 -f /data/arp.dat -N -F \
+                -w alerts@localhost
+          startupProbe:
+            exec:
+              command:
+                - pgrep
+                - arpwatch
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 6
+          env:
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: gatus-secrets
+                  key: slack-webhook-url
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /usr/local/bin/notify-slack.sh
+              subPath: notify-slack.sh
+              readOnly: true
+          securityContext:
+            capabilities:
+              add:
+                - NET_RAW
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: arpwatch-data
+        - name: config
+          configMap:
+            name: arpwatch-config
+            defaultMode: 0755

@@ -1,0 +1,22 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: tofu
+  namespace: flux-system
+spec:
+  interval: 10m
+  # The Terraform CRD is installed by the tofu-controller HelmRelease in the
+  # infrastructure layer. dependsOn does not guarantee the Helm install has
+  # finished, so the first apply after merge can fail once with
+  # `no matches for kind "Terraform"`; retryInterval self-heals it.
+  retryInterval: 1m
+  dependsOn:
+    - name: infrastructure
+  path: ./clusters/my-cluster/tofu
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  # wait: false — a plan-only Terraform CR never reports Ready=True.
+  wait: false
+  timeout: 5m

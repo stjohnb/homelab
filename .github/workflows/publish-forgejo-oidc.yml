@@ -1,0 +1,90 @@
+---
+name: Publish Forgejo Actions OIDC discovery
+
+# Mirrors Forgejo's live Actions OIDC discovery document and JWKS from the
+# LAN-only instance to the public issuer https://www.bstjohn.net/forgejo-oidc,
+# so AWS IAM can verify Forgejo Actions ID tokens. Dispatch-only: run it after
+# setting/changing FORGEJO__actions__OIDC_ISSUER_URL, after a Forgejo upgrade,
+# and any time the Actions JWT signing key rotates. See docs/forgejo.md.
+# Triggers removed for the public snapshot — this workflow is intentionally disabled.
+# See the private source repository for the active version.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+
+# `aws`, `curl` and `jq` come from this repo's flake.nix `scripts` devShell —
+# the self-hosted NixOS runners provide only nix/git/docker.
+env:
+  NIX_FLAGS: --extra-experimental-features nix-command --extra-experimental-features flakes
+  ISSUER: https://www.bstjohn.net/forgejo-oidc
+  FORGEJO_DISCOVERY: https://git.home.bstjohn.net/api/actions/.well-known/openid-configuration
+  FORGEJO_KEYS: https://git.home.bstjohn.net/api/actions/.well-known/keys
+
+jobs:
+  publish:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      # Fetches from the live instance rather than a committed copy: the
+      # Actions signing key is Forgejo's, not ours, and can rotate.
+      - name: Fetch discovery document and JWKS from Forgejo
+        run: |
+          nix $NIX_FLAGS develop .#scripts --command bash -euo pipefail -c '
+            curl -fsS --max-time 30 "$FORGEJO_DISCOVERY" -o openid-configuration
+            curl -fsS --max-time 30 "$FORGEJO_KEYS" -o keys
+            jq . openid-configuration
+            jq -r ".keys[].kid" keys
+          '
+
+      # Guard: refuse to publish a document that still advertises the LAN
+      # issuer. That is what a Forgejo running without the fork image, or
+      # without FORGEJO__actions__OIDC_ISSUER_URL, serves — publishing it
+      # would put an unverifiable issuer on the public URL.
+      - name: Verify the served issuer is the public one
+        run: |
+          nix $NIX_FLAGS develop .#scripts --command bash -euo pipefail -c '
+            got_iss=$(jq -r ".issuer" openid-configuration)
+            got_jwks=$(jq -r ".jwks_uri" openid-configuration)
+            if [ "$got_iss" != "$ISSUER" ]; then
+              echo "::error::issuer is \"$got_iss\", expected \"$ISSUER\" — is the fork image deployed and FORGEJO__actions__OIDC_ISSUER_URL set?"
+              exit 1
+            fi
+            if [ "$got_jwks" != "${ISSUER}/.well-known/keys" ]; then
+              echo "::error::jwks_uri is \"$got_jwks\", expected \"${ISSUER}/.well-known/keys\""
+              exit 1
+            fi
+            if [ "$(jq ".keys | length" keys)" -lt 1 ]; then
+              echo "::error::JWKS has no keys"
+              exit 1
+            fi
+          '
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a  # v4.3.1
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+
+      # `aws s3 cp` per file, not `sync`: sync sets binary/octet-stream on these
+      # extensionless keys, and the short max-age avoids needing a CloudFront
+      # invalidation (the publish role has no invalidation permission).
+      - name: Upload discovery document
+        run: >
+          nix $NIX_FLAGS develop .#scripts --command
+          aws s3 cp openid-configuration
+          s3://www.bstjohn.net/forgejo-oidc/.well-known/openid-configuration
+          --content-type application/json --cache-control max-age=60
+
+      - name: Upload JWKS
+        run: >
+          nix $NIX_FLAGS develop .#scripts --command
+          aws s3 cp keys
+          s3://www.bstjohn.net/forgejo-oidc/.well-known/keys
+          --content-type application/json --cache-control max-age=60

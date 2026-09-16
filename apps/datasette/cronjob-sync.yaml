@@ -1,0 +1,129 @@
+---
+# Nightly Postgres -> SQLite export behind Datasette. See docs/datasette.md.
+#
+# The export runs as an initContainer so a failed export leaves the previous
+# snapshot served and never triggers the rollout restart that follows it.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: datasette-sync
+  labels:
+    app: datasette-sync
+spec:
+  # After postgres-db-backup (02:30) so the two do not contend for the instance.
+  schedule: "30 3 * * *"
+  timeZone: Europe/London
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 5400
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            # Load-bearing: apps/postgres/networkpolicy.yaml keys on this label
+            # to admit the exporter to port 5432.
+            app: datasette-sync
+        spec:
+          serviceAccountName: datasette-sync
+          restartPolicy: Never
+          enableServiceLinks: false
+          priorityClassName: low-priority
+          # Must match the datasette Deployment: datasette-data is an RWO
+          # local-path volume mounted by both workloads, which is legal only
+          # while they share a node.
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: node-role.kubernetes.io/gpu
+                        operator: DoesNotExist
+                      - key: node-role.kubernetes.io/storage
+                        operator: DoesNotExist
+          initContainers:
+            - name: export
+              image: python:3.12.7-slim
+              command:
+                - /bin/bash
+                - /scripts/sync.sh
+              env:
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-superuser
+                      key: POSTGRES_PASSWORD
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 512Mi
+                limits:
+                  # psycopg2 buffers a whole table client-side; the biggest
+                  # remaining table is ~31 MB and this is the headroom. If it
+                  # OOMKills, raise the limit rather than restructure the export.
+                  cpu: 1000m
+                  memory: 3Gi
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 65534
+                runAsGroup: 65534
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                - name: work
+                  mountPath: /work
+                - name: scripts
+                  mountPath: /scripts
+                - name: tmp
+                  mountPath: /tmp
+          containers:
+            # Datasette enumerates *.db at startup and holds their fds, so the
+            # new snapshot is only picked up by a restart.
+            - name: restart-datasette
+              image: alpine/k8s:1.33.3
+              env:
+                - name: HOME
+                  value: /tmp
+                - name: KUBECACHEDIR
+                  value: /tmp/kubecache
+              command:
+                - /bin/sh
+                - -c
+                - kubectl rollout restart deployment/datasette -n default
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 65534
+                runAsGroup: 65534
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: datasette-data
+            - name: work
+              emptyDir:
+                sizeLimit: 4Gi
+            - name: scripts
+              configMap:
+                name: datasette-sync-script
+            - name: tmp
+              emptyDir: {}

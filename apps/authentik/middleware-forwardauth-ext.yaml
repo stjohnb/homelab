@@ -1,0 +1,22 @@
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: authentik-forwardauth-ext
+  namespace: default
+spec:
+  forwardAuth:
+    address: http://authentik-proxy-ext.default.svc.cluster.local:9000/outpost.goauthentik.io/auth/traefik
+    # MUST stay false. With `true`, Traefik copies the *client's* X-Forwarded-Host,
+    # -Uri, -Proto and -Method verbatim into the auth subrequest, and Authentik's
+    # outpost picks which application's policy bindings to evaluate from
+    # X-Forwarded-Host — so the client, not the proxy, would choose the policy.
+    # With `false`, Traefik derives them from the real req.Host / req.URL.
+    # This is a no-op in normal operation (the websecure entrypoint already strips
+    # untrusted X-Forwarded-* headers) but removes the dependency on that default.
+    trustForwardHeader: false
+    authResponseHeaders:
+      - X-authentik-username
+      - X-authentik-groups
+      - X-authentik-email
+      - X-authentik-name
+      - X-authentik-uid

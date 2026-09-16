@@ -1,0 +1,126 @@
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: media-nfs-pv
+spec:
+  capacity:
+    storage: 10Ti
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 192.168.0.128
+    path: /mnt/SSD-POOL/media
+  mountOptions:
+    - nfsvers=3
+    - hard
+    - intr
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: media-pvc
+  labels:
+    app: servarr
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Ti
+  volumeName: media-nfs-pv
+  storageClassName: ""
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: media-soft-nfs-pv
+spec:
+  capacity:
+    storage: 10Ti
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 192.168.0.128
+    path: /mnt/SSD-POOL/media
+  # Readers only (Plex, Jellyfin). A running pod gets EIO when the NAS sleeps
+  # mid-session instead of blocking in D-state forever. Writers keep the hard
+  # mount on media-nfs-pv — soft writes can be silently lost.
+  mountOptions:
+    - nfsvers=3
+    - soft
+    - timeo=50
+    - retrans=2
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: media-soft-pvc
+  labels:
+    app: media
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Ti
+  volumeName: media-soft-nfs-pv
+  storageClassName: ""
+
+---
+# Pool ROOT export. Sonarr/Radarr hardlink imports with link(2); on failure
+# both silently fall back to a full copy — that leaked ~86 GiB on a 95%-full
+# pool (issue #727).
+#
+# link(2) requires both paths to be under the SAME vfsmount, not merely the
+# same filesystem: fs/namei.c do_linkat returns EXDEV when
+# old_path.mnt != new_path.mnt. Kubernetes creates one bind mount per
+# volumeMounts entry, so two subPath mounts of this PVC are two vfsmounts of
+# one NFS superblock — identical st_dev, still EXDEV (issue #1072).
+#
+# Therefore any consumer that must hardlink mounts this claim EXACTLY ONCE,
+# with NO subPath (Sonarr and Radarr mount it at /data), and reaches its
+# library and downloads paths through that one mount via symlinks created in
+# the container entrypoint. Do NOT "tidy" those symlinks back into subPath
+# volumeMounts, and do NOT move a hardlinking consumer onto media-pvc or a
+# separate downloads PV. Consumers that never link (Transmission, Bazarr) may
+# keep a plain subPath mount.
+# Requires SSD-POOL/downloads to stay a plain directory, never a ZFS dataset.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ssdpool-nfs-pv
+spec:
+  capacity:
+    storage: 10Ti
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 192.168.0.128
+    path: /mnt/SSD-POOL
+  mountOptions:
+    - nfsvers=3
+    - hard
+    - intr
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ssdpool-pvc
+  labels:
+    app: servarr
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Ti
+  volumeName: ssdpool-nfs-pv
+  storageClassName: ""

@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: default
+  labels:
+    app: ollama
+spec:
+  replicas: 1
+  strategy:
+    # PVC is RWO — rolling update would deadlock waiting for the old pod
+    # to release the volume before the new pod can mount it.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: standard
+      terminationGracePeriodSeconds: 30
+      runtimeClassName: nvidia
+      # Requires the GPU worker node to be joined and the nvidia-device-plugin
+      # DaemonSet to be Ready before this deployment can schedule.
+      # See docs/gpu-k3s.md for the setup and migration procedure.
+      nodeSelector:
+        node-role.kubernetes.io/gpu: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: ollama
+          image: ollama/ollama:0.5.4
+          ports:
+            - containerPort: 11434
+              name: http
+          env:
+            - name: OLLAMA_HOST
+              value: "0.0.0.0:11434"
+            - name: OLLAMA_MODELS
+              value: /root/.ollama/models
+            - name: OLLAMA_KEEP_ALIVE
+              value: "30m"
+            # 6 GB card shared with Whisper. minicpm-v alone is ~5.5 GB, so a
+            # second resident model would CUDA-OOM. Cap at one.
+            - name: OLLAMA_MAX_LOADED_MODELS
+              value: "1"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: 4000m
+              memory: 8Gi
+              nvidia.com/gpu: 1
+          startupProbe:
+            httpGet:
+              path: /
+              port: 11434
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 11434
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 11434
+            periodSeconds: 30
+          volumeMounts:
+            - name: models
+              mountPath: /root/.ollama
+        # Declarative model preload. `ollama pull` is a client call against the
+        # server in the sibling container, so this can be neither an
+        # initContainer (server not up yet) nor a native sidecar (those must be
+        # Ready before the main container starts). A plain second container
+        # waits for the API, pulls, then idles. Pulls are idempotent — an
+        # already-present model returns immediately — so restarts are free and
+        # a rebuilt PVC self-heals.
+        - name: model-preload
+          image: ollama/ollama:0.5.4
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              until /bin/ollama list >/dev/null 2>&1; do sleep 5; done
+              for m in $OLLAMA_PRELOAD_MODELS; do
+                echo "pulling $m"
+                /bin/ollama pull "$m"
+              done
+              echo "preload complete"
+              exec sleep infinity
+          env:
+            - name: OLLAMA_HOST
+              value: "127.0.0.1:11434"
+            # Space-separated. minicpm-v (~5.5 GB Q4) backs Garden's
+            # /seeds/import seed-packet OCR — see docs/gpu-k3s.md.
+            - name: OLLAMA_PRELOAD_MODELS
+              value: "minicpm-v"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: ollama-models-pvc

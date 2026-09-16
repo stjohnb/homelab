@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: claws-session-ingress-from-claws
+  namespace: claws-sessions
+spec:
+  podSelector:
+    matchLabels:
+      claws-workload: session
+  policyTypes:
+    - Ingress
+  ingress:
+    # A single from-peer combining namespaceSelector AND podSelector: two
+    # separate list items would be an OR and admit any pod in default or
+    # any app: claws-staging pod in any namespace. Production Claws is still
+    # external at 192.168.0.73; its selector is added at cutover, not here.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+          podSelector:
+            matchLabels:
+              app: claws-staging
+      ports:
+        - protocol: TCP
+          port: 7681
+  # Egress is deliberately unrestricted: session pods need git clone and
+  # provider API access. If egress is ever restricted here, it must still
+  # allow DNS (UDP/TCP 53 to kube-dns) and TCP 3000 to app: claws-staging in
+  # default for the claws-state MCP server (CLAWS_SESSION_MCP_URL).

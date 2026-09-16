@@ -1,0 +1,63 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: renovate-config
+  labels:
+    app: renovate
+data:
+  # Renovate's global (self-hosted) config. Neither perudo nor bin-scraper
+  # carries a renovate.json on Forgejo, so requireConfig is "optional" and
+  # everything below is the effective config for both. Adding a migrated repo
+  # = adding one line to `repositories`.
+  #
+  # Do NOT add per-package `schedule` values: this runs once a week from the
+  # CronJob, so any schedule window narrower than that may never match.
+  config.json: |
+    {
+      "platform": "forgejo",
+      "endpoint": "https://git.home.bstjohn.net/api/v1",
+      "gitAuthor": "Renovate Bot <renovate@home.bstjohn.net>",
+      "timezone": "Europe/London",
+      "onboarding": false,
+      "requireConfig": "optional",
+      "persistRepoData": false,
+      "repositories": [
+        "St-John-Software/perudo",
+        "St-John-Software/bin-scraper"
+      ],
+      "extends": ["config:recommended"],
+      "dependencyDashboard": true,
+      "labels": ["dependencies"],
+      "rangeStrategy": "bump",
+      "prConcurrentLimit": 3,
+      "prHourlyLimit": 2,
+      "minimumReleaseAge": "3 days",
+      "automerge": false,
+      "lockFileMaintenance": {
+        "enabled": true,
+        "schedule": ["at any time"]
+      },
+      "packageRules": [
+        {
+          "description": "One PR for all non-major npm updates",
+          "matchManagers": ["npm"],
+          "matchUpdateTypes": ["minor", "patch"],
+          "groupName": "npm non-major"
+        },
+        {
+          "description": "One PR for all Actions pins",
+          "matchManagers": ["github-actions"],
+          "groupName": "actions"
+        },
+        {
+          "description": "Self-built release images are bumped by their own CI, never by Renovate",
+          "matchDatasources": ["docker"],
+          "matchPackageNames": [
+            "registry.home.bstjohn.net/st-john-software/bin-scraper",
+            "ghcr.io/st-john-software/bin-scraper"
+          ],
+          "enabled": false
+        }
+      ]
+    }

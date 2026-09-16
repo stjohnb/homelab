@@ -1,0 +1,151 @@
+# Nightly Postgres -> SQLite export pipeline for Datasette. See docs/datasette.md.
+#
+# The controlling invariant: the raw export is written to an emptyDir (/work),
+# redacted there, and only a `VACUUM INTO` copy of the redacted database is ever
+# written to the served PVC. VACUUM INTO copies live pages only, so overwritten
+# values cannot survive in freelist pages of the served file.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: datasette-sync-script
+  labels:
+    app: datasette-sync
+data:
+  sync.sh: |
+    set -eu
+    PGHOST=postgres; PGPORT=5432
+    export TMPDIR=/tmp HOME=/tmp PYTHONUSERBASE=/tmp/py PATH="/tmp/py/bin:$PATH"
+
+    # readOnlyRootFilesystem, so install into the writable /tmp emptyDir. Pinned;
+    # fleet-infra builds no images (#1189) so there is nothing to bake this into.
+    # NOT the [postgresql] extra: it pulls plain psycopg2, which publishes no
+    # Linux wheels and would need a compiler and pg_config to build here.
+    # psycopg2-binary provides the same `psycopg2` module from a manylinux wheel.
+    pip install --no-cache-dir --user --quiet 'db-to-sqlite==1.5' 'psycopg2-binary==2.9.10'
+
+    # k3s adds a new pod's IP to the netpol ipset a moment AFTER start, so a
+    # one-shot Job's first connection is refused for ~1s (docs/postgres.md).
+    i=0
+    until (exec 3<>/dev/tcp/$PGHOST/$PGPORT) 2>/dev/null; do
+      i=$((i+1)); [ "$i" -lt 60 ] || { echo "postgres never came up"; exit 1; }
+      sleep 2
+    done
+
+    URL="postgresql://postgres:${PGPASSWORD}@${PGHOST}:${PGPORT}"
+    DBS=$(python -c "
+    import os
+    from sqlalchemy import create_engine, text
+    e = create_engine('postgresql://postgres:%s@postgres:5432/postgres' % os.environ['PGPASSWORD'])
+    with e.connect() as c:
+        print(' '.join(r[0] for r in c.execute(text(
+          \"select datname from pg_database where datistemplate=false \"
+          \"and datname <> 'postgres' order by 1\"))))
+    ")
+    echo "databases: $DBS"
+
+    FAILED=""
+    for db in $DBS; do
+      # Skipped: huge, low-value or unmappable tables. Nothing FK-references any of
+      # them (verified), so db-to-sqlite's FK pass still succeeds. tasklog is also
+      # skipped because task tracebacks can quote credential material.
+      case "$db" in
+        immich)    EXTRA="--skip smart_search --skip face_search --skip geodata_places --skip naturalearth_countries" ;;
+        authentik) EXTRA="--skip authentik_tasks_tasklog" ;;
+        claws)     EXTRA="--skip job_logs" ;;
+        *)         EXTRA="" ;;
+      esac
+      echo "=== $db ==="
+      rm -f "/work/$db.db" "/data/$db.db.new"
+      # $EXTRA unquoted on purpose - word-splitting is the point.
+      if db-to-sqlite "$URL/$db" "/work/$db.db" --all $EXTRA \
+         && python /scripts/redact.py "/work/$db.db" "$db" \
+         && python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"VACUUM INTO '\"+sys.argv[2]+\"'\")" "/work/$db.db" "/data/$db.db.new"; then
+        mv -f "/data/$db.db.new" "/data/$db.db"   # .db.new is not matched by datasette's *.db scan
+      else
+        echo "ERROR: export of $db failed"; FAILED="$FAILED $db"
+        rm -f "/data/$db.db.new"
+      fi
+      rm -f "/work/$db.db"
+    done
+    [ -z "$FAILED" ] || { echo "FAILED databases:$FAILED"; exit 1; }
+    ls -lh /data
+  redact.py: |
+    import re, sqlite3, sys
+
+    path, db = sys.argv[1], sys.argv[2]
+
+    # Layer 1: tables whose entire contents are credential/session material.
+    # Rows are DELETEd, not skipped at export, so foreign keys stay intact.
+    PURGE = {
+        "authentik": [
+            "authentik_core_token", "authentik_core_session",
+            "authentik_core_authenticatedsession", "authentik_flows_flowtoken",
+            "authentik_providers_oauth2_accesstoken",
+            "authentik_providers_oauth2_refreshtoken",
+            "authentik_providers_oauth2_authorizationcode",
+            "authentik_providers_oauth2_devicetoken",
+            "authentik_providers_proxy_proxysession",
+            "authentik_providers_rac_connectiontoken",
+            "authentik_providers_saml_samlsession",
+            "authentik_crypto_certificatekeypair", "authentik_enterprise_license",
+            "authentik_policies_unique_password_userpasswordhistory",
+            "authentik_stages_authenticator_totp_totpdevice",
+            "authentik_stages_authenticator_static_statictoken",
+            "authentik_stages_authenticator_sms_smsdevice",
+            "authentik_stages_authenticator_email_emaildevice",
+            "authentik_stages_authenticator_webauthn_webauthndevice",
+            "django_session", "django_postgres_cache_cacheentry",
+            "django_channels_postgres_groupchannel",
+        ],
+        "forgejo": [
+            "session", "forgejo_auth_token", "two_factor", "webauthn_credential",
+            "oauth2_grant", "oauth2_authorization_code", "external_login_user",
+            "push_mirror", "hook_task", "system_setting", "email_hash",
+        ],
+        "immich": ["session", "api_key"],
+    }
+
+    # Layer 2: name-pattern redaction, applied to EVERY table of EVERY database so
+    # a column added by a future upstream migration is covered with no edit here.
+    # Deliberately errs wide: over-redacting a boolean is cheaper than leaking one
+    # secret. Primary-key and foreign-key columns are never touched (that would
+    # break row identity and Datasette's link navigation).
+    SENSITIVE = re.compile(
+        r"passwd|password|secret|token|salt|hash|credential|cookie|session|nonce"
+        r"|otp|totp|mfa|passcode|scratch|keytab|encrypted|jwt|signature|private"
+        r"|pin_?code|apikey|key$|(^|_)key(_|$)")
+    KEEP = {  # metadata key/value tables: the "key" is a map key, not a secret
+        "immich": {("asset_metadata", "key"), ("asset_metadata_audit", "key"),
+                   ("user_metadata", "key"), ("user_metadata_audit", "key"),
+                   ("system_metadata", "key")},
+        "forgejo": {("user_setting", "setting_key")},
+    }
+
+    conn = sqlite3.connect(path)
+    purged = cols = 0
+    for t in PURGE.get(db, []):
+        if conn.execute("select 1 from sqlite_master where type='table' and name=?",
+                        (t,)).fetchone():
+            conn.execute('DELETE FROM "%s"' % t); purged += 1
+    tables = [r[0] for r in conn.execute(
+        "select name from sqlite_master where type='table' "
+        "and name not like 'sqlite_%'")]
+    for t in tables:
+        fk = {r[3] for r in conn.execute('PRAGMA foreign_key_list("%s")' % t)}
+        for row in conn.execute('PRAGMA table_xinfo("%s")' % t).fetchall():
+            name, pk, hidden = row[1], row[5], row[6]
+            if pk or hidden or name in fk:          # hidden != 0 => generated col
+                continue
+            if (t, name) in KEEP.get(db, set()):
+                continue
+            if not SENSITIVE.search(name.lower()):
+                continue
+            q = 'UPDATE "%s" SET "%s" = %%s WHERE "%s" IS NOT NULL' % (t, name, name)
+            try:
+                conn.execute(q % "'[redacted]'")
+            except sqlite3.IntegrityError:          # UNIQUE index on the column
+                conn.execute(q % "'[redacted-' || rowid || ']'")
+            cols += 1
+    conn.commit(); conn.close()
+    print("redacted %d columns across %d tables, purged %d tables" %
+          (cols, len(tables), purged))

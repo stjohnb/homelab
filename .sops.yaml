@@ -1,0 +1,10 @@
+creation_rules:
+  # Traefik Middleware carrying the Awtrix devices' HTTP Basic credential.
+  # Only the Authorization header value is encrypted, so the CRD stays
+  # schema-valid for `kustomize build` / kubeconform without the age key.
+  - path_regex: apps/awtrix/middleware-basicauth\.enc\.yaml$
+    encrypted_regex: ^(Authorization)$
+    age: age17tuhxkp7ma9xfzpsan63c94qdn4c48v6f0z5uak7updragn8ep9q0y3xfz
+  - path_regex: \.enc\.yaml$
+    encrypted_regex: ^(data|stringData)$
+    age: age17tuhxkp7ma9xfzpsan63c94qdn4c48v6f0z5uak7updragn8ep9q0y3xfz

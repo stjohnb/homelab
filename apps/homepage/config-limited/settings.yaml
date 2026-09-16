@@ -1,0 +1,11 @@
+title: Home
+
+theme: dark
+color: slate
+cardBlur: xs
+statusStyle: dot
+
+layout:
+  Apps:
+    style: row
+    columns: 3

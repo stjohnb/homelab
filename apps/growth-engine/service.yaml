@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: growth-engine
+  labels:
+    app: growth-engine
+spec:
+  type: ClusterIP
+  selector:
+    app: growth-engine
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http

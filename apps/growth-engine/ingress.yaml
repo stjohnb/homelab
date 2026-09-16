@@ -1,0 +1,53 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: growth-engine
+  labels:
+    app: growth-engine
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default-authentik-auth@kubernetescrd
+spec:
+  ingressClassName: traefik-traefik
+  tls:
+    - hosts:
+        - growth-engine.home.bstjohn.net
+      secretName: wildcard-home-tls
+  rules:
+    - host: growth-engine.home.bstjohn.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: growth-engine
+                port:
+                  number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: growth-engine-ext
+  labels:
+    app: growth-engine
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default-authentik-auth-ext@kubernetescrd
+spec:
+  ingressClassName: traefik-traefik
+  tls:
+    - hosts:
+        - growth-engine.ext.bstjohn.net
+      secretName: wildcard-home-tls
+  rules:
+    - host: growth-engine.ext.bstjohn.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: growth-engine
+                port:
+                  number: 80

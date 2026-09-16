@@ -1,0 +1,126 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: growth-engine
+  labels:
+    app: growth-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: growth-engine
+  template:
+    metadata:
+      labels:
+        app: growth-engine
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: low-priority
+      imagePullSecrets:
+        - name: registry-pull
+      initContainers:
+        - name: ge-migrate
+          image: registry.home.bstjohn.net/st-john-software/growth-engine:20260915-2312-5b5a953
+          imagePullPolicy: IfNotPresent
+          command: ["ge", "migrate"]
+          env:
+            - name: GROWTH_ENGINE_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: growth-engine-db-secret
+                  key: password
+            - name: DATABASE_URL
+              value: postgres://growth_engine:$(GROWTH_ENGINE_DB_PASSWORD)@postgres.default.svc.cluster.local:5432/growth_engine
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+      containers:
+        - name: growth-engine
+          # update-growth-engine.yml rewrites this tag (both containers).
+          image: registry.home.bstjohn.net/st-john-software/growth-engine:20260915-2312-5b5a953
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: PORT
+              value: "8080"
+            - name: GROWTH_ENGINE_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: growth-engine-db-secret
+                  key: password
+            - name: DATABASE_URL
+              value: postgres://growth_engine:$(GROWTH_ENGINE_DB_PASSWORD)@postgres.default.svc.cluster.local:5432/growth_engine
+            - name: GROWTH_ENGINE_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: growth-engine-master-key
+                  key: master-key
+            # Shared browser service (#1383, docs/browser.md). apps depends on
+            # migrations, so browser-token already exists by the time this
+            # Deployment reconciles — no optional: true needed, unlike
+            # claws-staging. Env order is load-bearing: kubelet's $(VAR)
+            # expansion only sees env vars declared earlier in this list, so
+            # BROWSER_TOKEN must stay above BROWSER_WS_ENDPOINT or the URL
+            # keeps the literal $(BROWSER_TOKEN) unexpanded. Cross-repo
+            # contract with growth-engine#9.
+            - name: BROWSER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: browser-token
+                  key: token
+            - name: BROWSER_WS_ENDPOINT
+              value: ws://browser.default.svc.cluster.local:3000/chromium/playwright?token=$(BROWSER_TOKEN)
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault

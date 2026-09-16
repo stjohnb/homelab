@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Secret
+type: Opaque
+metadata:
+    name: claws-github-app
+    namespace: default
+stringData:
+    private-key.pem: ENC[AES256_GCM,data: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,iv:NaTr0ys4FSqQXW9K8xY5BgFf/aBTX0UBdKywJ/bisbY=,tag:yUQWCP6lZZlLtn6o2z88rA==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age17tuhxkp7ma9xfzpsan63c94qdn4c48v6f0z5uak7updragn8ep9q0y3xfz
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBtVnAwaGJmVFp3bzZsVlBC
+            WXBvdndtcUZCYzhpWk9sQUdVVHhPNktMalZRCm9seENWRngzeXBnRklqbmo2aHdL
+            V29UM0JiNkpnN0J6Um9CTVozWWVYV00KLS0tIFhoTUxvZU4xNEFGR1ZXc2pPaVRq
+            ek5UaDgxRFJVSDZITWhhTDRTYytFTkkKKcsSPQb+Xdtiya084Yvzk/UvpTxK1QvX
+            Z4DhAKRLyhgAj5xukkLWJqY7wdMtDqJgpwEK6RMahd9gFGNZRY2iFg==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-09-02T18:50:09Z"
+    mac: ENC[AES256_GCM,data:0qAvIzhjET2LOdGbGcFdwndJ6ilhpYiT9C0T7URL6sXkGsoTJqq92FuLjhvQli47HAJ9NRhm7OGzn4IKdLWCDSc61yWYzYdelAE4COFxsxvUCGz6Kw0PBeHs0tGpZrXUP5rFOK8ViMphbksTfspcbApLQ9wgM6IzJzw0ysIYtZ8=,iv:ut8xR6jl1f6xGO9hGT+6z2qCHhcCoFnh8Ut2QrS+c/s=,tag:8kKshNYJwMyzlhw5Q5RUCg==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

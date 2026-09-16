@@ -1,0 +1,25 @@
+---
+# The claws-staging StatefulSet, gated on claws-staging-prepull (#1373): Flux
+# will not apply a new revision here until the pre-puller has applied it and
+# is Ready, so the image is already on node k3s when the pod restarts.
+# No `wait`: the 420s grace period plus a startup probe of up to 300s would
+# exceed any sane timeout and report false failures. `apps` must never be
+# added to either side of this chain, so a bad claws tag cannot stall every
+# app; the ServiceAccount, Secrets and ghcr-pull it uses stay in apps.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: claws-staging
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: claws-staging-prepull
+  interval: 10m
+  retryInterval: 30s
+  path: ./clusters/my-cluster/claws-staging
+  prune: true
+  timeout: 5m
+  targetNamespace: default
+  sourceRef:
+    kind: GitRepository
+    name: flux-system

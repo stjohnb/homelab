@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: browser
+  labels:
+    app: browser
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: a rolling update would briefly run two 4Gi
+  # Chromium pods on k3s, and in-flight sessions die on a rollout either way.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: browser
+  template:
+    metadata:
+      labels:
+        app: browser
+    spec:
+      # k3s is the only always-on node, and both consumers (Claws and
+      # growth-engine) run there too.
+      nodeSelector:
+        kubernetes.io/hostname: k3s
+      priorityClassName: low-priority
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: chromium
+          image: ghcr.io/browserless/chromium:v2.56.7
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            # These three numbers are the queue: a third caller waits up to
+            # QUEUED deep, a caller arriving once the queue is full gets
+            # HTTP 429, and a stuck session is killed after TIMEOUT ms.
+            - name: CONCURRENT
+              value: "2"
+            - name: QUEUED
+              value: "10"
+            - name: TIMEOUT
+              value: "300000"
+            - name: TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: browser-token
+                  key: token
+          # /active and /pressure both require ?token=, and a kubelet httpGet
+          # probe cannot expand $(VAR) into a query string. This exec probe
+          # runs node inside the container so the token never appears in argv.
+          readinessProbe:
+            exec:
+              command:
+                - node
+                - -e
+                - fetch('http://127.0.0.1:3000/active?token='+process.env.TOKEN).then(r=>process.exit(r.status===204?0:1),()=>process.exit(1))
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          # Cheap liveness check that needs no token: just confirm the port
+          # accepts connections.
+          livenessProbe:
+            tcpSocket:
+              port: 3000
+            periodSeconds: 20
+            failureThreshold: 3
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              memory: 4Gi
+      volumes:
+        # Chromium in a container needs a real /dev/shm. tmpfs pages here
+        # count against the container's 4Gi memory limit above.
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi

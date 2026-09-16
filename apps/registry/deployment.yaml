@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  labels:
+    app: registry
+spec:
+  replicas: 1
+  # Single ReadWriteOnce local-path volume — never run two pods against it.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: registry
+  template:
+    metadata:
+      labels:
+        app: registry
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: standard
+      securityContext:
+        fsGroup: 65532
+      # Keep the registry off the GPU node (ryzen) and the NAS node (k3s-nas).
+      # Both carry NoSchedule taints this pod does not tolerate; the affinity is
+      # belt-and-braces in case a taint is ever removed. The local-path volume
+      # must stay on the 24/7 k3s node.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/gpu
+                    operator: DoesNotExist
+                  - key: node-role.kubernetes.io/storage
+                    operator: DoesNotExist
+      containers:
+        - name: zot
+          image: ghcr.io/project-zot/zot-linux-amd64:v2.1.20
+          ports:
+            - containerPort: 5000
+              name: http
+          env:
+            - name: TZ
+              value: Europe/London
+          # tcpSocket, NOT httpGet: with auth enabled and no anonymous policy
+          # every unauthenticated request to /v2/ answers 401, which an httpGet
+          # probe scores as a failure and would crashloop the pod.
+          readinessProbe:
+            tcpSocket:
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/registry
+            - name: config
+              mountPath: /etc/zot
+              readOnly: true
+            - name: secret
+              mountPath: /secret
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: registry-data
+        - name: config
+          configMap:
+            name: registry-config
+        # items: is load-bearing — registry-auth also holds the plaintext
+        # ci-password/puller-password keys that CI and humans read with
+        # `kubectl get secret`, and those must never reach the pod filesystem.
+        - name: secret
+          secret:
+            secretName: registry-auth
+            defaultMode: 0444
+            items:
+              - key: htpasswd
+                path: htpasswd
+              - key: oidc.json
+                path: oidc.json
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,95 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-backup-retention-script
+  labels:
+    app: postgres
+data:
+  # Grandfather-father-son retention, shared by immich-db-backup and
+  # postgres-db-backup so both jobs obey one rule. Called ONLY after a dump has
+  # been fully verified — see issue #1008 and #698: the old flat "keep 14 most
+  # recent" gave the 6-hourly Immich job just ~3.5 days of history, so every
+  # pre-incident dump had rotated away before the empty-database bug was found.
+  gfs-prune.sh: |
+    set -eu
+
+    #   $1  directory holding the dumps
+    #   $2  glob for the dump files (e.g. '*.pgdump')
+    #
+    # Filenames must end in -YYYYMMDD-HHMMSS<ext>. Anything that does not match
+    # is left strictly alone: never counted towards a bucket, never deleted.
+
+    DIR="${1:?usage: gfs-prune.sh <dir> <glob>}"
+    GLOB="${2:?usage: gfs-prune.sh <dir> <glob>}"
+
+    KEEP_RECENT_DAYS=2   # every dump from today and yesterday
+    KEEP_DAILY=14        # newest dump of each of the last 14 distinct days
+    KEEP_WEEKLY=8        # newest dump of each of the last 8 Mon-anchored weeks
+    KEEP_MONTHLY=6       # newest dump of each of the last 6 calendar months
+
+    [ -d "$DIR" ] || { echo "FAIL: retention: $DIR is not a directory"; exit 1; }
+    cd "$DIR"
+
+    # Days since 1970-01-01, integer arithmetic only (days_from_civil). Busybox
+    # date cannot be trusted to parse these stamps, and mtime is unreliable on NFS.
+    day_number() {
+        Y=$1; M=$2; D=$3
+        if [ "$M" -le 2 ]; then Y=$((Y - 1)); MP=$((M + 9)); else MP=$((M - 3)); fi
+        ERA=$((Y / 400)); YOE=$((Y - ERA * 400))
+        DOY=$(((153 * MP + 2) / 5 + D - 1))
+        DOE=$((YOE * 365 + YOE / 4 - YOE / 100 + DOY))
+        echo $((ERA * 146097 + DOE - 719468))
+    }
+
+    # Constant filename prefix per directory, so a reverse lexical sort is a
+    # reverse chronological sort.
+    FILES="$(ls -1 $GLOB 2>/dev/null | sed -n "/-[0-9]\{8\}-[0-9]\{6\}[^/]*$/p" | sort -r || true)"
+    if [ -z "$FILES" ]; then
+        echo "retention: no timestamped dumps in $DIR, nothing to prune"
+        exit 0
+    fi
+
+    KEEPLIST="$(mktemp)"
+    seen_days=" "; n_days=0
+    seen_weeks=" "; n_weeks=0
+    seen_months=" "; n_months=0
+    newest_day=""
+
+    for F in $FILES; do
+        STAMP="$(echo "$F" | sed -n 's/.*-\([0-9]\{8\}\)-[0-9]\{6\}[^/]*$/\1/p')"
+        [ -n "$STAMP" ] || continue
+        YY="$(echo "$STAMP" | cut -c1-4)"
+        MM="$(echo "$STAMP" | cut -c5-6)"
+        DD="$(echo "$STAMP" | cut -c7-8)"
+        DAYNUM="$(day_number "$YY" "${MM#0}" "${DD#0}")"
+        WEEK=$(((DAYNUM + 3) / 7))
+        MONTH="${YY}${MM}"
+        [ -n "$newest_day" ] || newest_day="$DAYNUM"
+
+        keep=0
+        if [ $((newest_day - DAYNUM)) -lt "$KEEP_RECENT_DAYS" ]; then keep=1; fi
+        case "$seen_days" in
+            *" $STAMP "*) ;;
+            *) seen_days="$seen_days$STAMP "; n_days=$((n_days + 1))
+               if [ "$n_days" -le "$KEEP_DAILY" ]; then keep=1; fi ;;
+        esac
+        case "$seen_weeks" in
+            *" $WEEK "*) ;;
+            *) seen_weeks="$seen_weeks$WEEK "; n_weeks=$((n_weeks + 1))
+               if [ "$n_weeks" -le "$KEEP_WEEKLY" ]; then keep=1; fi ;;
+        esac
+        case "$seen_months" in
+            *" $MONTH "*) ;;
+            *) seen_months="$seen_months$MONTH "; n_months=$((n_months + 1))
+               if [ "$n_months" -le "$KEEP_MONTHLY" ]; then keep=1; fi ;;
+        esac
+        if [ "$keep" -eq 1 ]; then echo "$F" >> "$KEEPLIST"; fi
+    done
+
+    for F in $FILES; do
+        grep -qxF "$F" "$KEEPLIST" || rm -v -- "$F"
+    done
+    rm -f "$KEEPLIST"
+
+    echo "retention: $DIR now holds $(ls -1 $GLOB 2>/dev/null | wc -l) files matching $GLOB"

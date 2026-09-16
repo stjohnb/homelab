@@ -1,0 +1,34 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arpwatch-config
+data:
+  notify-slack.sh: |
+    #!/bin/sh
+    # arpwatch calls this as a sendmail replacement.
+    # It pipes the email (headers + body) to stdin.
+
+    WEBHOOK_URL="$SLACK_WEBHOOK_URL"
+    if [ -z "$WEBHOOK_URL" ]; then
+      echo "SLACK_WEBHOOK_URL not set" >&2
+      exit 1
+    fi
+
+    # Read the full message from stdin
+    MSG=$(cat)
+
+    # Suppress alerts for 0.0.0.0 — these are normal ARP probes / DHCP discovery
+    # and generate flip-flop noise when multiple devices probe the network.
+    if echo "$MSG" | grep -qE 'ip[[:space:]]+address[[:space:]]*:[[:space:]]*0\.0\.0\.0'; then
+      echo "arpwatch: suppressed 0.0.0.0 flip-flop alert" >&2
+      exit 0
+    fi
+
+    SUBJECT=$(echo "$MSG" | grep -i '^Subject:' | head -1 | sed 's/^Subject: *//')
+    BODY=$(echo "$MSG" | sed '1,/^$/d' | head -20)
+
+    TEXT=$(printf '*arpwatch:* %s\n```%s```' "$SUBJECT" "$BODY")
+
+    curl -s -X POST -H 'Content-Type: application/json' \
+      -d "$(jq -n --arg text "$TEXT" '{text: $text}')" \
+      "$WEBHOOK_URL"

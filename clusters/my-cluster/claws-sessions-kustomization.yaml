@@ -1,0 +1,25 @@
+---
+# Separate from apps: the apps Kustomization sets targetNamespace: default,
+# which would rename the claws-sessions Namespace object itself to "default"
+# and land its PSA-restricted labels there, breaking most workloads. This
+# layer sets no targetNamespace, so every object here keeps its own
+# metadata.namespace: claws-sessions.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: claws-sessions
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  path: ./clusters/my-cluster/claws-sessions
+  prune: true
+  wait: true
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age

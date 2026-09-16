@@ -1,0 +1,102 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plex
+  labels:
+    app: plex
+spec:
+  replicas: 1
+  strategy:
+    # RWO config volume — never run two Plex servers against one database.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: plex
+  template:
+    metadata:
+      labels:
+        app: plex
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: low-priority
+      enableServiceLinks: false
+      # Unpinned from k3s-nas (#800): Plex only reads media, over NFS either way.
+      containers:
+        - name: plex
+          image: plexinc/pms-docker:1.43.3.10828-00f62d37d
+          env:
+            - name: TZ
+              value: "Europe/London"
+            # MUST match the ownership of the restored config data, which came
+            # off the old FreeBSD jail as uid/gid 972. Changing these means
+            # chown-ing ~11G of restored metadata instead.
+            - name: PLEX_UID
+              value: "972"
+            - name: PLEX_GID
+              value: "972"
+            # No PLEX_CLAIM. The server identity is restored from the old
+            # Preferences.xml, so it keeps its existing MachineIdentifier and
+            # stays the same server to every client and to plex.tv. Claiming
+            # would mint a new identity and force everyone to re-pair.
+            - name: ADVERTISE_IP
+              value: "https://plex.home.bstjohn.net:443"
+          ports:
+            - name: pms
+              containerPort: 32400
+              protocol: TCP
+          volumeMounts:
+            - name: plex-config
+              mountPath: /config
+            # MOUNT PATH IS LOAD-BEARING. The restored database records its
+            # library roots as /mnt/media/{Movies,TV,Music,New}. Mounting the
+            # media anywhere else leaves all 42k items showing as unavailable
+            # until every library is re-pointed by hand.
+            - name: media
+              mountPath: /mnt/media
+            - name: transcode
+              mountPath: /transcode
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 200m
+            limits:
+              memory: 6Gi
+              cpu: 4000m
+          # /identity answers unauthenticated, which is exactly what a probe
+          # needs — anything else would require a token.
+          startupProbe:
+            httpGet:
+              path: /identity
+              port: 32400
+            periodSeconds: 10
+            # Generous: the first start after a restore upgrades the database
+            # from 1.32 to 1.43, which is slow and must not be interrupted.
+            failureThreshold: 90
+          livenessProbe:
+            httpGet:
+              path: /identity
+              port: 32400
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /identity
+              port: 32400
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: plex-config
+          persistentVolumeClaim:
+            claimName: plex-config
+        - name: media
+          persistentVolumeClaim:
+            claimName: media-soft-pvc
+        # Transcoding is scratch by definition — keeping it out of the config
+        # volume stops it bloating backups of the library database.
+        - name: transcode
+          emptyDir: {}
+
+      restartPolicy: Always

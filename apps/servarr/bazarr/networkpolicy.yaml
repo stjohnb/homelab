@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bazarr-ingress-restricted
+  labels:
+    app: bazarr
+spec:
+  podSelector:
+    matchLabels:
+      app: bazarr
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [gatus]
+      ports:
+        - protocol: TCP
+          port: 6767

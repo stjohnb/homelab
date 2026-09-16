@@ -1,0 +1,72 @@
+apiVersion: infra.contrib.fluxcd.io/v1alpha2
+kind: Terraform
+metadata:
+  name: unifi
+  namespace: flux-system
+spec:
+  interval: 30m
+  path: ./tofu/unifi
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+    namespace: flux-system
+  # PLAN ONLY. Do not set approvePlan until a UniFi console backup exists on
+  # the NAS (#1187) and a human has read the plan. See docs/unifi.md.
+  planOnly: true
+  # Also write the plan as readable text to the ConfigMap tfplan-default-unifi
+  # in flux-system, so reading it is a `kubectl get configmap`, not a hexdump
+  # of the binary plan Secret. `human` (not `json`): the json form embeds raw
+  # variable values, the human form renders sensitive ones as
+  # "(sensitive value)".
+  storeReadablePlan: human
+  serviceAccountName: tf-runner
+  # The passphrase MUST come in here and NOT through the runner's envFrom:
+  # terraform-exec refuses to start when any TF_VAR_* env var is set on the
+  # process ("manual setting of env var ... detected"). The Secret key is
+  # therefore `iot_wifi_passphrase`, with no TF_VAR_ prefix. Never add a
+  # TF_VAR_-prefixed key to unifi-tofu-credentials.
+  varsFrom:
+    - kind: Secret
+      name: unifi-tofu-credentials
+      varsKeys:
+        - iot_wifi_passphrase
+  runnerPodTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tf-runner
+    spec:
+      # ryzen and k3s-nas are powered off most of the day; the console is only
+      # reachable while the runner is actually scheduled.
+      nodeSelector:
+        kubernetes.io/hostname: k3s
+      # Provider credentials only (UNIFI_USERNAME/UNIFI_PASSWORD, or
+      # UNIFI_API_KEY). These are not TF_VAR_* and are accepted.
+      envFrom:
+        - secretRef:
+            name: unifi-tofu-credentials
+      # Providers come only from the offline mirror in provider-mirror.yaml —
+      # that is what lets networkpolicy.yaml deny all public egress (#1247).
+      env:
+        - name: TF_CLI_CONFIG_FILE
+          value: /etc/opentofu/tofu.tfrc
+      volumeMounts:
+        - name: provider-mirror
+          mountPath: /opt/opentofu/plugins
+          readOnly: true
+        - name: tofu-cli-config
+          mountPath: /etc/opentofu
+          readOnly: true
+      volumes:
+        - name: provider-mirror
+          persistentVolumeClaim:
+            claimName: tofu-provider-mirror
+            readOnly: true
+        - name: tofu-cli-config
+          configMap:
+            name: tofu-cli-config
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          memory: 512Mi

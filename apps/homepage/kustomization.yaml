@@ -1,0 +1,34 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+configMapGenerator:
+  - name: homepage-config
+    files:
+      - settings.yaml=config/settings.yaml
+      - services.yaml=config/services.yaml
+      - bookmarks.yaml=config/bookmarks.yaml
+      - widgets.yaml=config/widgets.yaml
+      - kubernetes.yaml=config/kubernetes.yaml
+      - docker.yaml=config/docker.yaml
+      - custom.css=config/custom.css
+      - custom.js=config/custom.js
+  # Only the two files that differ between the two dashboards (#1079).
+  - name: homepage-limited-config
+    files:
+      - settings.yaml=config-limited/settings.yaml
+      - services.yaml=config-limited/services.yaml
+  - name: homepage-router-config
+    files:
+      - nginx.conf=config-router/nginx.conf
+
+generatorOptions:
+  disableNameSuffixHash: false
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - deployment-limited.yaml
+  - service-limited.yaml
+  - deployment-router.yaml
+  - service-router.yaml

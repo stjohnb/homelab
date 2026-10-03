@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: growth-engine-master-key
+    labels:
+        app: growth-engine
+type: Opaque
+stringData:
+    master-key: ENC[AES256_GCM,data:mSRddC+YF/CIULpwzNGzmb2JrdOSpFSPIBO1ZiuPZwVYsIkkq7TfSdawyjg=,iv:AzFEO3Yl0JV3LkeKgnzLl3ZSA98oDPydB/eQMIduNkk=,tag:yL+lZ7Q5Usy204H/aAmBpQ==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age17tuhxkp7ma9xfzpsan63c94qdn4c48v6f0z5uak7updragn8ep9q0y3xfz
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBMSHF0QW0rdWJKMTM4aFZ3
+            N2FFbVN6WWVtVW1LV2l3UXlUekpEeGdheGtJCmdJR0M3UWZhd2NpVVBTL3lwNzFy
+            TWVsTkFSMEQzVmNWdmhFbElJbTdWczAKLS0tIGVpODlMb2NGU0pId1IxQ1gyaURL
+            ZXE4cWkyQ1dUMHYzREVMZ09Xd3NQY0UKNWq1c4zWth/d0KtEYdEqJJOZep9x+yUe
+            8dwhCyYHEm/bfs0G51P0NZCkkpz9DqNdxCDT/H/2Ibqr/MqXfWLwuw==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-09-15T15:35:12Z"
+    mac: ENC[AES256_GCM,data:BCzqnrhslGU2HDkurIInu8PFPu0r+YMLOV3WlHyfl6Rv8yumZYSSMlxOGb0Uz6PlwViE8+pTYlRSd1EjHKb4kTLQkizmqkJcYdg9FGSnhEDfwXn+MXlZISPO/w9rWlbdE+xsUJdcSmikaPejs+iAi9aHQWtgIyEjUC6A132blAY=,iv:LjwL4gzvzNmITB4w7kc8emX7beK3AMmvJez+W+XrxKg=,tag:UtyXj3L29mt2hxnmSJ4rNw==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

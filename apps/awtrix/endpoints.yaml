@@ -1,0 +1,20 @@
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: awtrix-kitchen
+subsets:
+  - addresses:
+      - ip: 192.168.0.30
+    ports:
+      - port: 80
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: awtrix-office
+subsets:
+  - addresses:
+      - ip: 192.168.0.160
+    ports:
+      - port: 80

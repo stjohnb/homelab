@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: browser
+  namespace: default
+  labels:
+    app: browser
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default-authentik-auth@kubernetescrd
+spec:
+  ingressClassName: traefik-traefik
+  tls:
+    - hosts:
+        - browser.home.bstjohn.net
+      secretName: wildcard-home-tls
+  rules:
+    - host: browser.home.bstjohn.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: browser
+                port:
+                  number: 3000

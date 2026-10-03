@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: overseerr-apikey-init-script
+  labels:
+    app: overseerr
+data:
+  apikey-init.py: |
+    # Pin Overseerr's main.apiKey from Secret request-app-apikeys (migration
+    # 0043) so the Sonarr/Radarr reconciler sidecars can read approved
+    # requests (docs/servarr.md). initContainer, NOT a sidecar: Settings.save()
+    # serialises the whole in-memory object over settings.json, so a live
+    # writer would be clobbered by any UI settings change. load() merges the
+    # file over the defaults with the file winning, so writing before start-up
+    # is authoritative. Same shape as Seerr's oidc-init.
+    import json, os
+
+    PATH = "/config/settings.json"
+    API_KEY = os.environ.get("OVERSEERR_API_KEY", "").strip()
+
+    def log(msg):
+        print("apikey-init: " + msg, flush=True)
+
+    def merge():
+        if not API_KEY:
+            log("OVERSEERR_API_KEY empty - skipping API key pin")
+            return
+        if not os.path.exists(PATH):
+            log("no settings.json yet - skipping; restart the pod once "
+                "Overseerr has written one")
+            return
+        try:
+            st = os.stat(PATH)
+            with open(PATH) as fh:
+                data = json.load(fh)
+        except Exception as exc:
+            # Never exit non-zero: that would wedge the pod in Init:CrashLoop.
+            log("could not parse settings.json (%s) - leaving it alone" % exc)
+            return
+        main = data.setdefault("main", {})
+        if main.get("apiKey") == API_KEY:
+            log("settings.json already correct")
+            return
+        main["apiKey"] = API_KEY
+        tmp = PATH + ".init-tmp"
+        try:
+            with open(tmp, "w") as fh:
+                json.dump(data, fh, indent=1)
+            # Keep the file owned by Overseerr's PUID/PGID, not root.
+            os.chown(tmp, st.st_uid, st.st_gid)
+            os.chmod(tmp, st.st_mode & 0o777)
+            os.replace(tmp, PATH)
+        except Exception as exc:
+            log("could not write settings.json (%s) - leaving it alone" % exc)
+            return
+        log("wrote main.apiKey")
+
+    merge()

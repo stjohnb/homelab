@@ -1,0 +1,12 @@
+# .ext counterpart of authentik-auth-basic; see middleware-chain-basic.yaml.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: authentik-auth-basic-ext
+  namespace: default
+spec:
+  chain:
+    middlewares:
+      - name: authentik-strip-authentik-headers
+      - name: authentik-forwardauth-ext
+      - name: authentik-strip-authorization

@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# garage-secrets and pages-s3-credentials are created by migrations 0041/0042
+# (migrations/0041-garage-secrets.sh, migrations/0042-pages-bucket.sh). Never
+# declare them here — Flux would overwrite the minted values.
+resources:
+  - pvc.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - networkpolicy.yaml
+  - cronjob-janitor.yaml

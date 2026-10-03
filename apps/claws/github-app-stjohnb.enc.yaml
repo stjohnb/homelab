@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Secret
+type: Opaque
+metadata:
+    name: claws-github-app-stjohnb
+    namespace: default
+stringData:
+    private-key.pem: ENC[AES256_GCM,data:+uIYVF2IzwrXWBnLmXj1evny/Ia35zM0+pCLj/Eq5J4QMP6NCEKvXYDVornO6/wRnf60RyK2VYAPUTQ2EGPMrFnyR54DP0ujJxBkYJKEtbJjBqXFKMfUwoeW1ieMjXlLpeg9YOIPHbCa9/EIgFqXZSLbWulv7Fpo2QEuDa/QSxK9/FecRHMEEhvPR26yGMtRt4vmVaSSa1PVC77S52iTfSZxal9H/my7v6S7S3GyToGgM413eLvdhuKv4IhKMRuk371bOTYdGuHcwUGNQNViTxJjJHBlpjqUa4vE3J+QtbRQ1F1L3sDuY21k2wf7pBCkKQJN9nfLagkCgZl9JaoQii1dne88NY4vEvfLPn87/F03fA/zq2g/lrGcR6oG7gL48OVEPphKjfjJyinR288duS/d1ZMenfAC8kk+rIG8idH5k064dU9jR/i8CVQf/RMvyzkPtfkr44wBoEH4/muK3LkfLWgi4An+6YkrzeSpKeqQMDlcwq4T8VjyOLR7cYqF+Bnma5C+++Y7A4Vu54KzoNKirniijzg5FmAlSuuCzUJWRjvU1gOl+oDRlc3NHTBpd09dSV7zIDPmwYVZLfYUeLZ1O/DfcYXjEwyi+zZlPwDvfNZ5ezlJAZfykh0G731VbN5gTH8Dy3S39mx6pbOg9rWm5lRKiEpzozk6gc4cURcMnaV8bt6xWOVgAYpm3zftX0hgyjvH+Kcb6wfDTb0SxX3goX8g77jj6WkJ2kXnX4Vzh37HVzuS0UGIa3V6sWrcRzVWipJ+DvVt/rYVlFg+ttDmZOYuCbbbXRZ9iPxNm+dc1JDgdMuelSjotwoQ7sP0j8U7DuNkT1Lk8gIyYG5jGa/YxRk2kMgdqc8CQQlqsLhayzGYQ2FBBL+HoBvCaLFNxpdj4zLPgPYA8gWATLF6UDUKREQUEhbSjxSgh459emncI2NY/I3EiNYxlokVZsTUQZtVJXCRFdQatxuob8lujvJ+93RciV46hGWly2wtzcmEuoGkhBbm0/0lu2KdffXgCNuisQ4slthMlew+AuVmCdNzZ/68CdzK1z5H9ka5h7eFclFsY6itefeo6ig2naON6wMJx9NMNgh9omJ/2l571P7SrYDLzJgU12IFCsqAIAKJhJp7zj5ehmr+UD0ou+4YL21qFls2N5M+EqFg02yM2iVCbd/SUgqC3UNh2p2QisRFSt+qoZpCgAmTnls3N85/yPOmd2T8nYSHe7PEb0y4i3oO0QYcE7mKNv5I7amzkh0n41U1l3oAnWAtfY5COI8eQqdHqb7WR86eckifZNCp8yQ3qTJUt4dBj01H3ItX5zvFYByPszm6qthx+5fYH8QOS2kzXJdhJMCSfb8f4j9lox0xTaaW6EF2RgbVJf6EgT4FrK+AM145fKdP13qy1bAx4W2u007844cRJ1T0rRLEtplJi1oIMm3KMqM/SQ0OgWgIFCd/AGzccl7Kyo2yGP+rObaMpbrQxrHtOkgbM8EpYrBaEc+T/tO8RBIrcw3rZ+JnHx0XBk6XpT2NPGzIyzOWfadorlZ8GPuE0r+TAf1e0QgTpu3D6s/vgXA3pkm4aXM0rPwvCvoJPWdIerogfaic3ZyxFyEDIgyfdFqBi00U5OaqLETPg3YYBd8IIPR+Z0WjnNSeEorDFlBWyqtS23DdNG5wdRfaFA/O5oR4Xi+J1qRevy88BhlQ9EDLlLY6e1trtTu1kz3J4n6tzc8T4/4CQ+5kfGFgR533ZZhRlrliflXx9Rk0h7fKK8B8qhS2p5NtIwXBPrypt640dBa9lv7cW+fY+31Xrvf3VCi67owej0/HoBepQpwyJvb49A30JGfazWKytVt/anSFGe6oiyam2mzu5bwIy2nMKBlGJ+BrEEfoTjlPswbJyTxO9iBVl/jfxpuLZYssDFnrSPaqL5wFe7hdIfhkGx5MSCmvdviNBmMmCjPSGFfuwrCs149OGWfFuo9fZ9KxaEkioKP/FMhrAsef5Qvm42cg1mSOHDRKJD6rbFDi1UtxIqLs73patTxCA4nFintcUj2jnevJctfftx8cUk7m7TCsFg7EYveU8HW25tI/KVIeMe482EjYGQfQbcjBS4gw2CxoP4WtjSjYR9Z1yV/Y4ysgDoG3rbx+15Oy9igpd7/tPMlx0fGdaHrvV0uxBrhrAuvmBQaq3KSJh5rQ8KNK2ujA4PrIfItfO4uROX4TA5iQ1Dazkxino9sEPCOpJEg8Yna9cA==,iv:RqUakN32IJuIiR7VB+djN1L+5Zuz5Fg3KGR21sVcKr8=,tag:US5+fw4beQj5sDKM4XYjEw==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age17tuhxkp7ma9xfzpsan63c94qdn4c48v6f0z5uak7updragn8ep9q0y3xfz
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBvRlBPOTF5S1YrZ0NvanJv
+            aW1ud3B2MTBhTGJVNUd3VUxCOUxOUE40eEVJCmZkZVlLVHFzYStndHhPWGpURm1M
+            YWRKMDBXU0w5VjdHSlEzZkdUdDNWV3cKLS0tIGdyL2g0UXg1L21xQ3ZLK0dLTXhE
+            R2M3MTdrM2NPZkVIaFFSN2tjNmg4dlUKMAn+PUsQX4+h/enWR+tq+e34dQZ789Jw
+            0s8QJYY9rZ+2Qre9z3hG8l9Uf2yMFPbIS/lav7XYQvi/q5BQ2Z1Lwg==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-09-02T18:26:12Z"
+    mac: ENC[AES256_GCM,data:1nnl1gN4MqdLoHc3puXjQlR+PPIbttf835uTXWui1SIn4Le4apDARYxzge6mBVjlMaV7+3woTHECdmI6v9lMOZRPhh8janUP7BIWIw95Sk3ih1qGPCLlAy0JmEYr2mbB37RSaQ1fBs4VQLAH5j6AIg2LZoI0pNlCqkUn28B27Yc=,iv:gd7elPz4c5k5ENoYp8bB33VrjegaGHRiQ2xJ0veXGOs=,tag:+VCtgzWQ8/sqClmyLnAk0A==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

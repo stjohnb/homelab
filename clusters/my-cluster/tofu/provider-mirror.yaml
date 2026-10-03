@@ -1,0 +1,113 @@
+---
+# Offline provider mirror for the unifi tf-runner (#1247).
+#
+# The runner has NO public egress (see networkpolicy.yaml). It resolves
+# providers only through this PVC, mounted read-only at /opt/opentofu/plugins
+# and selected by the mirror-only tofu.tfrc below. This Job — which is NOT
+# selected by the NetworkPolicy, so it still has full egress — is the only
+# thing that talks to registry.opentofu.org.
+#
+# local-path has no allowVolumeExpansion: a resize is rejected by the API
+# server and wedges this whole Kustomization. Never edit the size.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tofu-provider-mirror
+  namespace: flux-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
+# Mounted at /etc/opentofu in the runner. Deliberately NO `direct` block:
+# omitting it is what makes registry.opentofu.org unreachable by construction.
+# Adding one back re-opens the hole the NetworkPolicy change closes.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tofu-cli-config
+  namespace: flux-system
+data:
+  tofu.tfrc: |
+    provider_installation {
+      filesystem_mirror {
+        path = "/opt/opentofu/plugins"
+      }
+    }
+---
+# Jobs are IMMUTABLE. The name carries the provider version so that a bump is
+# a new Job (and Flux prunes the old one); any other edit to the pod template
+# also requires a rename, or the apply fails with "field is immutable".
+# Do NOT add ttlSecondsAfterFinished — the Job would be garbage-collected and
+# then re-created by Flux on the next reconcile, re-downloading every 10m and
+# wiping the mirror under a running plan.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tofu-provider-mirror-1-1-0
+  namespace: flux-system
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        # Must NOT be app.kubernetes.io/name: tf-runner — that label is what
+        # networkpolicy.yaml selects, and this Job needs internet egress.
+        app.kubernetes.io/name: tofu-provider-mirror
+    spec:
+      restartPolicy: Never
+      # Same node as the runner: the PVC is ReadWriteOnce local-path.
+      nodeSelector:
+        kubernetes.io/hostname: k3s
+      containers:
+        - name: mirror
+          # Same image (and therefore same tofu) the controller runs the
+          # runner with; kept equal to the chart version by
+          # scripts/check-tofu-provider-mirror.sh.
+          image: ghcr.io/flux-iac/tf-runner:v0.16.5
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              set -eu
+              mkdir -p /tmp/cfg
+              cat > /tmp/cfg/versions.tf <<EOF
+              terraform {
+                required_providers {
+                  unifi = {
+                    source  = "filipowm/unifi"
+                    version = "${PROVIDER_VERSION}"
+                  }
+                }
+              }
+              EOF
+              rm -rf /mirror/registry.opentofu.org
+              cd /tmp/cfg
+              tofu providers mirror -platform=linux_amd64 /mirror
+              ls -R /mirror
+          env:
+            # Duplicated from tofu/unifi/versions.tf on purpose (the Job cannot
+            # read the repo); scripts/check-tofu-provider-mirror.sh fails CI if
+            # the two drift.
+            - name: PROVIDER_VERSION
+              value: "1.1.0"
+            # uid 65532 cannot write to /, tofu's default HOME.
+            - name: HOME
+              value: /tmp
+          volumeMounts:
+            - name: mirror
+              mountPath: /mirror
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: mirror
+          persistentVolumeClaim:
+            claimName: tofu-provider-mirror

@@ -1,0 +1,16 @@
+# local-path cannot expand a volume: never edit this size in place. The bucket
+# quota (20 GiB, set by migrations/0042-pages-bucket.sh) keeps pages well inside
+# it; the headroom is for a future second tenant (Garden photos, #1006).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    app: garage
+  name: garage-data
+spec:
+  storageClassName: local-path
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi

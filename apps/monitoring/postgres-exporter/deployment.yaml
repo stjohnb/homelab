@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-exporter
+  namespace: default
+  labels:
+    app: postgres-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-exporter
+  template:
+    metadata:
+      labels:
+        app: postgres-exporter
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: low-priority
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        # Connects as the superuser deliberately: a non-superuser sees NULL
+        # `state`/`usename` for every backend it does not own, which would make
+        # the per-role attribution this exporter exists for (#1235) useless. A
+        # superuser also still gets one of the 5 slots held by
+        # superuser_reserved_connections while the instance is otherwise full,
+        # so the exporter keeps reporting through exactly the squeeze it is
+        # meant to explain.
+        #
+        # No custom query file and no --extend.query-path (deprecated upstream):
+        # v0.20.1's default `stat_activity` collector already emits
+        # pg_stat_activity_count{datname,state,usename,application_name,
+        # backend_type,wait_event_type,wait_event} and the `settings` collector
+        # emits pg_settings_max_connections, which is the whole saturation ratio.
+        - name: postgres-exporter
+          image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1
+          ports:
+            - containerPort: 9187
+              name: metrics
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: DATA_SOURCE_URI
+              value: postgres.default.svc.cluster.local:5432/postgres?sslmode=disable
+            - name: DATA_SOURCE_USER
+              value: postgres
+            - name: DATA_SOURCE_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-superuser
+                  key: POSTGRES_PASSWORD
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          startupProbe:
+            httpGet:
+              path: /
+              port: 9187
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 9187
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 9187
+            periodSeconds: 30

@@ -1,0 +1,13 @@
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: proxmox-transport
+  namespace: default
+spec:
+  # Verify the PVE node cert against the Proxmox cluster CA instead of
+  # accepting anything. The leaf carries IP SAN 192.168.0.200, which is the
+  # address Traefik dials via apps/proxmox/endpoints.yaml, so no serverName
+  # override is needed. Traefik v3.1's CRD has no `rootCAs` (ConfigMap) field —
+  # `rootCAsSecrets` is the only option until the chart moves past v3.2.
+  rootCAsSecrets:
+    - proxmox-root-ca

@@ -1,0 +1,136 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: loki
+  namespace: default
+spec:
+  interval: 1h
+  install:
+    timeout: 10m
+    remediation:
+      retries: 3
+  upgrade:
+    timeout: 10m
+    remediation:
+      retries: 3
+  chart:
+    spec:
+      chart: loki
+      # 6.16.0 -> 6.55.0 moves Loki 3.1.1 -> 3.6.7, skipping 3.2-3.5 against
+      # upstream's "upgrade sequentially" advice; there is no staging Loki.
+      # Checked the 3.2-3.6 breaking changes against this config and none
+      # apply: no bloom filters, ruler or S3 (filesystem store, so the 3.4
+      # Thanos client and 3.6 AWS SDK v2 changes are moot), and TSDB schema
+      # v13 is still supported. Every overridden values key keeps its shape.
+      # After merge, check loki-0 goes Ready and Grafana Explore still returns
+      # logs; if not, revert this PR so Flux rolls the chart back (schema and
+      # PVC layout are unchanged, so the log store stays readable).
+      version: "6.55.0"
+      sourceRef:
+        kind: HelmRepository
+        name: grafana
+        namespace: flux-system
+      interval: 12h
+  values:
+    deploymentMode: SingleBinary
+    loki:
+      auth_enabled: false
+      commonConfig:
+        replication_factor: 1
+      storage:
+        type: filesystem
+      schemaConfig:
+        configs:
+          - from: "2024-01-01"
+            store: tsdb
+            object_store: filesystem
+            schema: v13
+            index:
+              prefix: loki_index_
+              period: 24h
+      limits_config:
+        retention_period: 168h
+      compactor:
+        retention_enabled: true
+        delete_request_store: filesystem
+      # Grafana's Logs Drilldown "Patterns" tab reads /loki/api/v1/patterns,
+      # which returns nothing unless this is on (chart 6.55.0 still defaults it
+      # to false). The SingleBinary "all" target already includes the pattern
+      # ingester component, so this adds no pod — just in-process memory for
+      # the pattern store. loki-0 sits at ~217Mi of its 1Gi limit today.
+      pattern_ingester:
+        enabled: true
+    singleBinary:
+      replicas: 1
+      priorityClassName: standard
+      # local-path is WaitForFirstConsumer with ALLOWVOLUMEEXPANSION: false, so
+      # the PVC pins its pod to whichever node schedules it first and can never
+      # be grown later. k3s-nas and ryzen power off daily, so this must land on
+      # the always-on control-plane node k3s or the log store goes dark with it.
+      nodeSelector:
+        kubernetes.io/hostname: k3s
+      persistence:
+        enabled: true
+        # The chart defaults this to true ("data is easy to replace"), which is
+        # false here: this PVC is the only copy of the log store, and a failed
+        # install (remediation = uninstall) or a StatefulSet recreate would
+        # delete it silently.
+        enableStatefulSetAutoDeletePVC: false
+        storageClass: local-path
+        size: 10Gi
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 1Gi
+    # nginx gateway adds nothing with a single replica and no multi-tenant
+    # routing need — Grafana and Promtail talk to the loki Service directly.
+    gateway:
+      enabled: false
+    read:
+      replicas: 0
+    write:
+      replicas: 0
+    backend:
+      replicas: 0
+    # gateway (above) plus these four all default to true in chart 6.16.0.
+    # Left enabled, chunksCache alone deploys a memcached StatefulSet with an
+    # 8Gi allocation — unnecessary for a single-binary, single-tenant install.
+    chunksCache:
+      enabled: false
+    resultsCache:
+      enabled: false
+    test:
+      enabled: false
+    lokiCanary:
+      enabled: false
+    # The chart adds a kiwigrid/k8s-sidecar container to sync Loki *ruler* rule
+    # ConfigMaps (sidecar.rules.enabled defaults to true in 6.16.0) but only
+    # creates its Role when rbac.pspEnabled/sccEnabled — neither applies here,
+    # so it would 403-loop forever. The ruler is out of scope; drop the sidecar
+    # rather than grant it RBAC.
+    sidecar:
+      rules:
+        enabled: false
+    serviceAccount:
+      automountServiceAccountToken: false
+    # Chart 6.16.0 labels this block DEPRECATED but still renders it and offers
+    # no replacement; re-check on the next chart bump.
+    monitoring:
+      serviceMonitor:
+        enabled: true
+        # kube-prometheus-stack's Prometheus sets serviceMonitorSelector to
+        # matchLabels release=kube-prometheus-stack. Without this label the
+        # ServiceMonitor is created and silently never scraped.
+        labels:
+          release: kube-prometheus-stack
+        # Chart default is 15s, sized for its own recording rules (disabled
+        # here). The ingestion alert uses a 30m window; 60s keeps Loki's few
+        # thousand series off the 20Gi/30d Prometheus PVC.
+        interval: 60s
+        # Defaults to true and renders under serviceMonitor.enabled; only the
+        # absent monitoring.grafana.com CRDs suppress it today. Pin it off.
+        metricsInstance:
+          enabled: false

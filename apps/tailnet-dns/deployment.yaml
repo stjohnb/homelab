@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tailnet-dns
+  labels:
+    app: tailnet-dns
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: two pods cannot hold the same hostPort, so a
+  # rolling update would deadlock with the new pod Pending on port conflict.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tailnet-dns
+  template:
+    metadata:
+      labels:
+        app: tailnet-dns
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: standard
+      # hostPort 53 is bound on the k3s node only, and only on its tailnet IP.
+      nodeSelector:
+        kubernetes.io/hostname: k3s
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: coredns
+          image: coredns/coredns:1.14.7
+          imagePullPolicy: IfNotPresent
+          args:
+            - -conf
+            - /etc/coredns/Corefile
+          ports:
+            # hostIP pins the bind to the Tailscale address. Do NOT drop it:
+            # without it the CNI portmap plugin DNATs 0.0.0.0:53 on the node
+            # and would hijack DNS for the LAN and for systemd-resolved.
+            - name: dns
+              containerPort: 5353
+              hostPort: 53
+              hostIP: 100.78.7.18
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: 5353
+              hostPort: 53
+              hostIP: 100.78.7.18
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8181
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: corefile
+              mountPath: /etc/coredns
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              # NET_BIND_SERVICE is NOT used at runtime (CoreDNS binds
+              # unprivileged 5353 here) but it MUST stay: the upstream image's
+              # /coredns carries the file capability cap_net_bind_service=+ep,
+              # and with allowPrivilegeEscalation: false (no_new_privs) the
+              # kernel refuses to execve a binary whose file caps are not a
+              # subset of the process permitted set — "exec /coredns:
+              # operation not permitted", CrashLoopBackOff (#1138).
+              add:
+                - NET_BIND_SERVICE
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: corefile
+          configMap:
+            name: tailnet-dns-corefile
+            items:
+              - key: Corefile
+                path: Corefile

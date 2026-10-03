@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: garage-config
+  labels:
+    app: garage
+data:
+  # rpc_secret and admin_token are NOT in this file: Garage reads them from the
+  # GARAGE_RPC_SECRET / GARAGE_ADMIN_TOKEN env vars, which come from the
+  # garage-secrets Secret minted by migrations/0041-garage-secrets.sh.
+  #
+  # s3_region must equal the AWS_DEFAULT_REGION every publisher uses (`garage`),
+  # or SigV4 signatures are rejected.
+  #
+  # s3_web.root_domain maps Host `pages.home.bstjohn.net` to bucket `pages`
+  # (Garage strips the root domain suffix to get the bucket name).
+  #
+  # s3_api.root_domain is deliberately absent: path-style S3 only. Virtual-host
+  # style would need `pages.s3.home.bstjohn.net`, which the wildcard cert cannot
+  # cover. Publishers must set `addressing_style = path` (docs/pages.md).
+  garage.toml: |
+    replication_factor = 1
+    consistency_mode = "consistent"
+    metadata_dir = "/var/lib/garage/meta"
+    data_dir = "/var/lib/garage/data"
+    db_engine = "lmdb"
+    rpc_bind_addr = "[::]:3901"
+    rpc_public_addr = "127.0.0.1:3901"
+
+    [s3_api]
+    api_bind_addr = "[::]:3900"
+    s3_region = "garage"
+
+    [s3_web]
+    bind_addr = "[::]:3902"
+    root_domain = ".home.bstjohn.net"
+
+    [admin]
+    api_bind_addr = "[::]:3903"
+    metrics_require_token = false

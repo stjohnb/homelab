@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mealie
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mealie
+  template:
+    metadata:
+      labels:
+        app: mealie
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: standard
+      enableServiceLinks: false
+      containers:
+        - name: mealie
+          image: ghcr.io/mealie-recipes/mealie:v3.28.0
+          ports:
+            - containerPort: 9000
+          env:
+            - name: TZ
+              value: Europe/London
+            - name: BASE_URL
+              value: https://mealie.home.bstjohn.net
+            # Pin to one uvicorn worker so there is exactly one SQLAlchemy pool
+            # (5 base + 10 overflow). The mealie role's CONNECTION LIMIT of 10
+            # (migrations/0031-postgres-connection-limits.sh) is sized for one pool:
+            # it covers the base pool plus half the overflow. Each extra worker
+            # would add another pool.
+            - name: UVICORN_WORKERS
+              value: "1"
+            # Database lives on the shared Postgres instance (apps/postgres).
+            # mealie-db-secret is created by migrations/0038-mealie-db.sh; the
+            # SQLite data was copied in by migrations/0039-mealie-sqlite-to-postgres.sh.
+            - name: DB_ENGINE
+              value: postgres
+            - name: POSTGRES_SERVER
+              value: postgres.default.svc.cluster.local
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_USER
+              value: mealie
+            - name: POSTGRES_DB
+              value: mealie
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mealie-db-secret
+                  key: password
+            - name: OIDC_AUTH_ENABLED
+              value: "true"
+            - name: OIDC_SIGNUP_ENABLED
+              value: "true"
+            - name: OIDC_CONFIGURATION_URL
+              value: https://auth.home.bstjohn.net/application/o/mealie/.well-known/openid-configuration
+            - name: OIDC_CLIENT_ID
+              value: mealie
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: MEALIE_OIDC_CLIENT_SECRET
+            - name: OIDC_AUTO_REDIRECT
+              value: "false"
+            - name: OIDC_PROVIDER_NAME
+              value: Authentik
+            - name: OIDC_ADMIN_GROUP
+              value: "authentik Admins"
+            - name: OIDC_REMEMBER_ME
+              value: "true"
+            - name: OIDC_SIGNING_ALGORITHM
+              value: RS256
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 9000
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          startupProbe:
+            httpGet:
+              path: /
+              port: 9000
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 9000
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - mountPath: /app/data
+              name: mealie-data
+      volumes:
+        - name: mealie-data
+          persistentVolumeClaim:
+            claimName: mealie-data

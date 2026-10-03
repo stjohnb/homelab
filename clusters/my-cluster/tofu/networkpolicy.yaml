@@ -1,0 +1,55 @@
+# Egress-only. Never add an Ingress rule here: the controller dials the runner
+# on gRPC 30000 and an Ingress policy would cut that off.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tf-runner-egress-restricted
+  namespace: flux-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tf-runner
+  policyTypes:
+    - Egress
+  egress:
+    # Cluster DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The UniFi console — the only LAN address this runner may reach.
+    - to:
+        - ipBlock:
+            cidr: 192.168.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+    # Kubernetes API (state is kept in a Secret). Both the ClusterIP and the
+    # post-DNAT node address, because kube-router evaluates either depending
+    # on the path.
+    - to:
+        - ipBlock:
+            cidr: 10.43.0.1/32
+        - ipBlock:
+            cidr: 192.168.0.251/32
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    # source-controller: the runner pulls the Git artifact tarball from it.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: source-controller
+      ports:
+        - protocol: TCP
+          port: 9090

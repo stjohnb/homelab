@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: garage
+  labels:
+    app: garage
+spec:
+  replicas: 1
+  # Single ReadWriteOnce local-path volume — never run two pods against it.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: garage
+  template:
+    metadata:
+      labels:
+        app: garage
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: standard
+      securityContext:
+        fsGroup: 1000
+      # Keep Garage off the GPU node (ryzen) and the NAS node (k3s-nas).
+      # Both carry NoSchedule taints this pod does not tolerate; the affinity is
+      # belt-and-braces in case a taint is ever removed. The local-path volume
+      # must stay on the 24/7 k3s node.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/gpu
+                    operator: DoesNotExist
+                  - key: node-role.kubernetes.io/storage
+                    operator: DoesNotExist
+      containers:
+        - name: garage
+          image: dxflrs/garage:v2.4.1
+          # --single-node (v2.3.0+) assigns and applies the one-node layout on
+          # start, so no `garage layout assign/apply` step is needed.
+          command: ["/garage", "server", "--single-node"]
+          ports:
+            - containerPort: 3900
+              name: s3
+            - containerPort: 3901
+              name: rpc
+            - containerPort: 3902
+              name: web
+            - containerPort: 3903
+              name: admin
+          # garage-secrets is created by migrations/0041-garage-secrets.sh. On a
+          # fresh cluster the pod sits in CreateContainerConfigError until that
+          # migration runs, which self-resolves.
+          env:
+            - name: TZ
+              value: Europe/London
+            - name: RUST_LOG
+              value: garage=info
+            - name: GARAGE_RPC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: garage-secrets
+                  key: GARAGE_RPC_SECRET
+            - name: GARAGE_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: garage-secrets
+                  key: GARAGE_ADMIN_TOKEN
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3903
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3903
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3903
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/garage
+            - name: config
+              mountPath: /etc/garage.toml
+              subPath: garage.toml
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: garage-data
+        - name: config
+          configMap:
+            name: garage-config
+        - name: tmp
+          emptyDir: {}

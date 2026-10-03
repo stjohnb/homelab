@@ -1,0 +1,199 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "ignorePaths": [
+    "clusters/my-cluster/flux-system/gotk-components.yaml"
+  ],
+  "flux": {
+    "managerFilePatterns": ["/(clusters|apps)/.+\\.ya?ml$/"]
+  },
+  "kubernetes": {
+    "managerFilePatterns": ["/apps/.+\\.ya?ml$/"]
+  },
+  "timezone": "Europe/London",
+  "schedule": ["after 10pm and before 7am"],
+  "rangeStrategy": "bump",
+  "dependencyDashboard": false,
+  "prConcurrentLimit": 20,
+  "prHourlyLimit": 5,
+  "minimumReleaseAge": "3 days",
+  "minimumReleaseAgeBehaviour": "timestamp-optional",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "kubeconform version in CI workflow",
+      "managerFilePatterns": ["/\\.github/workflows/.+\\.yml$/"],
+      "matchStrings": ["kubeconform/releases/download/v(?<currentValue>.+?)/kubeconform"],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "yannh/kubeconform",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "kubesec version in CI workflow",
+      "managerFilePatterns": ["/\\.github/workflows/.+\\.yml$/"],
+      "matchStrings": ["kubesec/releases/download/v(?<currentValue>.+?)/kubesec"],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "controlplaneio/kubesec",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Trivy version in CI workflow",
+      "managerFilePatterns": ["/\\.github/workflows/.+\\.yml$/"],
+      "matchStrings": ["TRIVY_VERSION=\"(?<currentValue>.+?)\""],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "aquasecurity/trivy",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "gitleaks version in CI workflow",
+      "managerFilePatterns": ["/\\.github/workflows/.+\\.yml$/"],
+      "matchStrings": ["GITLEAKS_VERSION=\"(?<currentValue>.+?)\""],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "gitleaks/gitleaks",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Flux CRD schemas version",
+      "managerFilePatterns": ["/\\.github/workflows/.+\\.yml$/", "/Taskfile\\.ya?ml$/"],
+      "matchStrings": ["fluxcd/flux2/releases/download/v(?<currentValue>.+?)/crd-schemas"],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "fluxcd/flux2",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Flux GitHub Action version",
+      "managerFilePatterns": ["/\\.github/workflows/.+\\.yml$/"],
+      "matchStrings": ["uses: fluxcd/flux2/action@v(?<currentValue>.+?)\\s"],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "fluxcd/flux2",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Self-built images — bumped by their build repos dispatching update-arpwatch.yml / update-forgejo-runner-nix.yml / update-forgejo.yml / update-bin-scraper.yml / update-garden.yml / update-claws.yml / update-growth-engine.yml / update-whyrr.yml, not Renovate",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": [
+        "registry.home.bstjohn.net/st-john-software/arpwatch",
+        "registry.home.bstjohn.net/st-john-software/bin-scraper",
+        "registry.home.bstjohn.net/st-john-software/forgejo-runner-nix",
+        "registry.home.bstjohn.net/st-john-software/forgejo",
+        "registry.home.bstjohn.net/st-john-software/garden",
+        "registry.home.bstjohn.net/st-john-software/growth-engine",
+        "registry.home.bstjohn.net/st-john-software/whyrr",
+        "ghcr.io/st-john-software/claws"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Label Helm chart dependency PRs",
+      "matchManagers": ["flux"],
+      "labels": ["dependencies", "helm"]
+    },
+    {
+      "description": "Major version bumps on any manager get major-update and wait for a human dashboard approval; they never receive Automerge",
+      "matchUpdateTypes": ["major"],
+      "addLabels": ["dependencies", "major-update"]
+    },
+    {
+      "description": "UniFi OpenTofu provider — extra soak before bumping the thing that writes to the live network. Renovate bumps the version constraint only; regenerate the lockfile in the PR with `tofu -chdir=tofu/unifi providers lock -platform=linux_amd64` or the tofu-validate job fails on a hash mismatch.",
+      "matchManagers": ["terraform"],
+      "matchPackageNames": ["filipowm/unifi"],
+      "minimumReleaseAge": "14 days",
+      "labels": ["dependencies", "tofu"]
+    },
+    {
+      "description": "tofu/unifi is run by OpenTofu, but Renovate's terraform manager reads required_version as hashicorp/terraform and proposes Terraform release numbers (PR #1676 proposed >= 1.16.4, which OpenTofu cannot satisfy). Raise the floor by hand to a version the flake's opentofu and the tf-runner image provide.",
+      "matchManagers": ["terraform"],
+      "matchDepTypes": ["required_version"],
+      "enabled": false
+    },
+    {
+      "description": "Label CI tool dependency PRs",
+      "matchManagers": ["custom.regex"],
+      "labels": ["dependencies", "ci"]
+    },
+    {
+      "description": "Label GitHub Actions pin bumps",
+      "matchManagers": ["github-actions"],
+      "labels": ["dependencies", "ci"]
+    },
+    {
+      "description": "Group LinuxServer.io servarr/media container images",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["/^linuxserver\\//", "!linuxserver/wireguard"],
+      "groupName": "linuxserver-images"
+    },
+    {
+      "description": "Group Immich container images",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["/^ghcr\\.io\\/immich-app\\//"],
+      "groupName": "immich"
+    },
+    {
+      "description": "Group Authentik container images. Authentik minor bumps (YYYY.M) are release-train changes that need a human merge — see the two rules below",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["/^ghcr\\.io\\/goauthentik\\//"],
+      "groupName": "authentik"
+    },
+    {
+      "description": "Authentik patch/pin/digest bumps within a train stay on the unattended Automerge path",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["/^ghcr\\.io\\/goauthentik\\//"],
+      "matchUpdateTypes": ["patch", "pin", "digest", "pinDigest"],
+      "addLabels": ["Automerge"]
+    },
+    {
+      "description": "Authentik YYYY.M minors are upstream major trains: never Automerge, human LGTM only. PR #1593 jumped 2026.2 -> 2026.8 unattended and took SSO down with `Major version skips are not allowed` (#1596)",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["/^ghcr\\.io\\/goauthentik\\//"],
+      "matchUpdateTypes": ["minor"],
+      "addLabels": ["dependencies", "major-update"],
+      "prBodyNotes": [
+        "**Authentik train change.** Authentik refuses to migrate across a skipped `YYYY.M` train (`Major version skips are not allowed`, #1596). If this PR crosses more than one train, edit it down to the next train only, let it roll out, then take the next one."
+      ]
+    },
+    {
+      "description": "Ollama patch/pin/digest bumps stay on the unattended Automerge path",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["ollama/ollama"],
+      "matchUpdateTypes": ["patch", "pin", "digest", "pinDigest"],
+      "addLabels": ["Automerge"]
+    },
+    {
+      "description": "Ollama is pre-1.0, so its 0.x minors are upstream feature releases on a stateful, GPU-pinned service (Garden seed-packet OCR): never Automerge, human LGTM only. PR #1655 jumped 0.5.4 -> 0.34.4 in one hop",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["ollama/ollama"],
+      "matchUpdateTypes": ["minor"],
+      "addLabels": ["dependencies", "major-update"],
+      "prBodyNotes": [
+        "**Ollama 0.x minor.** Pre-1.0 minors can change API defaults, model loading and GPU runtime requirements. After merging, check `kubectl -n default logs deploy/ollama --all-containers` and confirm `minicpm-v` reloads and the API responds."
+      ]
+    },
+    {
+      "description": "Group monitoring exporter images",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["prompve/prometheus-pve-exporter"],
+      "groupName": "monitoring"
+    },
+    {
+      "description": "Renovate runs under the operator's PAT, an allowed Claws actor, so Claws merges its non-major (minor/patch/pin/digest) updates unattended inside the 22:00–07:00 Europe/London window once CI is green and its review of the current head is clean. The `Automerge` label is a visible marker only; Claws does not read it. Major updates carry `major-update` and wait for a human. OpenTofu paths always need a human merge. Authentik (ghcr.io/goauthentik/*) and Ollama (ollama/ollama) are excluded here and handled by their own rules above.",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest", "pinDigest"],
+      "matchPackageNames": [
+        "!registry.home.bstjohn.net/st-john-software/**",
+        "!ghcr.io/st-john-software/claws",
+        "!ghcr.io/goauthentik/**",
+        "!ollama/ollama"
+      ],
+      "addLabels": ["Automerge"]
+    }
+  ]
+}

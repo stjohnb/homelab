@@ -1,0 +1,86 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: registry-config
+  labels:
+    app: registry
+data:
+  # zot v2.1.20. Notes that are load-bearing:
+  #   - http.port must be a STRING; zot's config struct types it as string.
+  #   - There is no anonymousPolicy key anywhere: its absence is what denies
+  #     anonymous pulls. Do not add one.
+  #   - The generic OIDC provider key must literally be "oidc" — zot only
+  #     accepts google/gitlab/oidc, and the callback path is derived from it.
+  #   - The issuer needs Authentik's trailing slash; zitadel/oidc compares it
+  #     byte-for-byte against the discovery document.
+  #   - deleteReferrers: false keeps buildx SBOM/provenance manifests attached
+  #     to the tags retention keeps.
+  #   - extensions.search.cve is deliberately absent, so no Trivy DB is
+  #     downloaded on startup.
+  #   - There is no extensions.userprefs key: v2.1.20's strict decoder rejects
+  #     it (crash-loop on startup). userprefs is enabled implicitly when both
+  #     search and ui are enabled (AreUserPrefsEnabled()).
+  config.json: |
+    {
+      "storage": {
+        "rootDirectory": "/var/lib/registry",
+        "dedupe": true,
+        "gc": true,
+        "gcDelay": "1h",
+        "gcInterval": "24h",
+        "retention": {
+          "dryRun": false,
+          "delay": "24h",
+          "policies": [
+            {
+              "repositories": ["**"],
+              "deleteReferrers": false,
+              "deleteUntagged": true,
+              "keepTags": [
+                { "patterns": ["^latest$"] },
+                { "patterns": [".*"], "mostRecentlyPushedCount": 5 }
+              ]
+            }
+          ]
+        }
+      },
+      "http": {
+        "address": "0.0.0.0",
+        "port": "5000",
+        "externalUrl": "https://registry.home.bstjohn.net",
+        "auth": {
+          "htpasswd": { "path": "/secret/htpasswd" },
+          "openid": {
+            "providers": {
+              "oidc": {
+                "name": "Authentik",
+                "issuer": "https://auth.home.bstjohn.net/application/o/registry/",
+                "credentialsFile": "/secret/oidc.json",
+                "scopes": ["openid", "email", "profile", "groups"],
+                "claimMapping": { "username": "preferred_username", "groups": "groups" }
+              }
+            }
+          }
+        },
+        "accessControl": {
+          "repositories": {
+            "**": {
+              "policies": [
+                { "users": ["ci"], "actions": ["read", "create", "update", "delete"] },
+                { "users": ["puller"], "actions": ["read"] },
+                { "groups": ["infra", "all-apps"], "actions": ["read"] }
+              ],
+              "defaultPolicy": []
+            }
+          },
+          "adminPolicy": { "users": ["ci"], "actions": ["read", "create", "update", "delete"] }
+        }
+      },
+      "log": { "level": "info" },
+      "extensions": {
+        "search": { "enable": true },
+        "ui": { "enable": true },
+        "mgmt": { "enable": true },
+        "metrics": { "enable": true, "prometheus": { "path": "/metrics" } }
+      }
+    }

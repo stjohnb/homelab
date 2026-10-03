@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whyrr
+  labels:
+    app: whyrr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: whyrr
+  template:
+    metadata:
+      labels:
+        app: whyrr
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: low-priority
+      imagePullSecrets:
+        - name: registry-pull
+      containers:
+        - name: whyrr
+          image: registry.home.bstjohn.net/st-john-software/whyrr:20260924-1322-9a387d1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 101
+            runAsGroup: 101
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault

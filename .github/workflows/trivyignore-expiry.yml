@@ -1,0 +1,70 @@
+---
+name: Trivyignore expiry
+
+# Advance warning for .trivyignore suppressions: expiry must never be first
+# seen as a failure on an unrelated PR. Runs the check script against main and
+# upserts one tracking issue while any suppression is within 30 days of expiry
+# (or expired), closing it once none are. Never edits .trivyignore.
+#
+# The job exits 0 even when entries are expired, by design: the issue is the
+# signal, and a failing job would also make Claws file a `Build failure` issue.
+# `gh` comes from the flake.nix `scripts` devShell.
+
+# Triggers removed for the public snapshot — this workflow is intentionally disabled.
+# See the private source repository for the active version.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: trivyignore-expiry
+  cancel-in-progress: false
+
+env:
+  ISSUE_TITLE: '[trivyignore] CVE suppressions expiring within 30 days'
+
+jobs:
+  report:
+    runs-on: [self-hosted, linux]
+    defaults:
+      run:
+        shell: nix --extra-experimental-features nix-command --extra-experimental-features flakes develop ${{ github.workspace }}#scripts --command bash -euo pipefail {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Check suppressions
+        run: |
+          set +e
+          ./scripts/check-trivyignore.sh --report "$RUNNER_TEMP/trivyignore-report.md" | tee -a "$GITHUB_STEP_SUMMARY"
+          set -e
+          exit 0
+
+      - name: Update tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # shellcheck source=scripts/lib-gh-issue.sh
+          source scripts/lib-gh-issue.sh
+          report="$RUNNER_TEMP/trivyignore-report.md"
+          if [ ! -s "$report" ]; then
+            gh_issue_close "$ISSUE_TITLE" \
+              "No suppressions expire within 30 days — closed automatically by trivyignore-expiry."
+            exit 0
+          fi
+          body="The following \`.trivyignore\` suppressions expire within 30 days (or have already expired):
+
+          $(cat "$report")
+
+          **What to do:** for each entry, re-evaluate it. If a fix is available, bump the image and remove the entry. If there is no fix yet, renew the \`exp:\` date and update the comment.
+
+          If nothing is done, \`ci.yml\` starts failing every PR on the expiry date.
+
+          _Filed by .github/workflows/trivyignore-expiry.yml; body is regenerated on each weekly run._"
+          gh_issue_upsert "$ISSUE_TITLE" "$body" --label ci

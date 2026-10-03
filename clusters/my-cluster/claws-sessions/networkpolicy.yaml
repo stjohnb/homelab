@@ -1,0 +1,42 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: claws-session-ingress-from-claws
+  namespace: claws-sessions
+spec:
+  podSelector:
+    matchLabels:
+      claws-workload: session
+  policyTypes:
+    - Ingress
+  ingress:
+    # A single from-peer combining namespaceSelector AND podSelector: two
+    # separate list items would be an OR and admit any pod in default or
+    # any app: claws pod in any namespace. Production Claws has been
+    # this one pod since the cutover (#1302) — labelled app: claws-staging
+    # until #1427 renamed it to app: claws — so no extra peer is needed here.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+          podSelector:
+            matchLabels:
+              app: claws
+      ports:
+        - protocol: TCP
+          port: 7681
+  # Claws agent pods (claws-workload: agent, CLAWS_WORK_BACKEND=k8s-pod,
+  # claws-agent-<rowId>) are intentionally NOT selected by this policy's
+  # podSelector: they expose no terminal port and need no ingress.
+  #
+  # Egress is deliberately unrestricted: session pods need git clone and
+  # provider API access. If egress is ever restricted here, it must cover
+  # both session and agent pods, and still allow DNS (UDP/TCP 53 to
+  # kube-dns) and TCP 3000 to app: claws in default for the claws-state
+  # MCP server (CLAWS_SESSION_MCP_URL) — for agent pods that port is their
+  # only route to Claws state. Agent pods get no Postgres access:
+  # apps/postgres/networkpolicy.yaml's postgres-ingress-restricted denies
+  # them by design (claws#clw_01M386P9KPDEVV33TKY512HHBC). Any future
+  # NetworkPolicy selecting app: claws must admit TCP 3000 from both
+  # claws-workload: session and claws-workload: agent pods in
+  # claws-sessions, not just session pods.

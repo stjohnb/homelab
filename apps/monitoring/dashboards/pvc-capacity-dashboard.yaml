@@ -1,0 +1,181 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-pvc-capacity
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: Custom
+data:
+  pvc-capacity.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "links": [],
+      "panels": [
+        {
+          "title": "PVC Usage (All)",
+          "type": "table",
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "displayMode": "auto"
+              }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "Usage %" },
+                "properties": [
+                  {
+                    "id": "custom.displayMode",
+                    "value": "color-background"
+                  },
+                  {
+                    "id": "unit",
+                    "value": "percent"
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        { "color": "green", "value": null },
+                        { "color": "yellow", "value": 80 },
+                        { "color": "red", "value": 90 }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "color",
+                    "value": { "mode": "thresholds" }
+                  }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "Used" },
+                "properties": [
+                  { "id": "unit", "value": "bytes" },
+                  { "id": "custom.width", "value": 100 }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "Capacity" },
+                "properties": [
+                  { "id": "unit", "value": "bytes" },
+                  { "id": "custom.width", "value": 100 }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "sortBy": [{ "displayName": "Usage %", "desc": true }],
+            "footer": { "show": false }
+          },
+          "transformations": [
+            {
+              "id": "merge",
+              "options": {}
+            },
+            {
+              "id": "organize",
+              "options": {
+                "renameByName": {
+                  "persistentvolumeclaim": "PVC",
+                  "namespace": "Namespace",
+                  "storageclass": "Storage Class",
+                  "Value #used": "Used",
+                  "Value #capacity": "Capacity",
+                  "Value #pct": "Usage %"
+                },
+                "excludeByName": {
+                  "Time": true,
+                  "__name__": true,
+                  "container": true,
+                  "endpoint": true,
+                  "instance": true,
+                  "job": true,
+                  "metrics_path": true,
+                  "node": true,
+                  "pod": true,
+                  "server": true,
+                  "service": true,
+                  "volumename": true
+                }
+              }
+            }
+          ],
+          "targets": [
+            {
+              "refId": "used",
+              "expr": "kubelet_volume_stats_used_bytes",
+              "instant": true,
+              "legendFormat": ""
+            },
+            {
+              "refId": "capacity",
+              "expr": "kubelet_volume_stats_capacity_bytes",
+              "instant": true,
+              "legendFormat": ""
+            },
+            {
+              "refId": "pct",
+              "expr": "kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes * 100",
+              "instant": true,
+              "legendFormat": ""
+            }
+          ]
+        },
+        {
+          "title": "Local-Path PVC Usage %",
+          "type": "bargauge",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 10 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "max": 100,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 80 },
+                  { "color": "red", "value": 90 }
+                ]
+              },
+              "color": { "mode": "thresholds" }
+            },
+            "overrides": []
+          },
+          "options": {
+            "orientation": "horizontal",
+            "displayMode": "gradient",
+            "reduceOptions": {
+              "calcs": ["lastNotNull"],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes * on(namespace,persistentvolumeclaim) kube_persistentvolumeclaim_info{storageclass=\"local-path\"} * 100",
+              "instant": true,
+              "legendFormat": "{{namespace}}/{{persistentvolumeclaim}}"
+            }
+          ]
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["storage", "pvc"],
+      "templating": { "list": [] },
+      "time": { "from": "now-6h", "to": "now" },
+      "title": "PVC Capacity",
+      "uid": "pvc-capacity"
+    }

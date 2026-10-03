@@ -1,0 +1,53 @@
+# Overrides the k3s-bundled kube-system/local-path-config ConfigMap so
+# claws-sessions PVC volume dirs are created 0770 instead of 0777 (#1382):
+# kubelet's fsGroup handling then yields drwxrws--- root:claws rather than
+# world-writable HOME inside PSA-restricted session pods, which can't
+# chmod/chown it themselves (no root, no CAP_FOWNER).
+# k3s re-applies its bundled local-storage add-on on every restart, so this
+# alone only wins via Flux drift correction within the 10m reconcile
+# interval; a local-storage.yaml.skip file on the k3s host (not managed
+# here, see docs/infrastructure-overview.md) is required to stop k3s from
+# re-applying at all.
+# config.json, helperPod.yaml and teardown must stay identical to the
+# k3s-bundled values — diff against `kubectl -n kube-system get cm
+# local-path-config -o yaml` before changing anything here, since a
+# mismatch changes provisioning for every local-path PVC in the cluster.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-path-config
+  namespace: kube-system
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+data:
+  config.json: |-
+    {
+      "nodePathMap":[
+      {
+        "node":"DEFAULT_PATH_FOR_NON_LISTED_NODES",
+        "paths":["/var/lib/rancher/k3s/storage"]
+      }
+      ]
+    }
+  helperPod.yaml: |-
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: helper-pod
+    spec:
+      containers:
+      - name: helper-pod
+        image: "rancher/mirrored-library-busybox:1.37.0"
+        imagePullPolicy: IfNotPresent
+  setup: |-
+    #!/bin/sh
+    set -eu
+    case "${VOL_DIR##*/}" in
+      *_claws-sessions_*) mkdir -m 0770 -p "${VOL_DIR}" ;;
+      *) mkdir -m 0777 -p "${VOL_DIR}" ;;
+    esac
+    chmod 700 "${VOL_DIR}/.."
+  teardown: |-
+    #!/bin/sh
+    set -eu
+    rm -rf "${VOL_DIR}"

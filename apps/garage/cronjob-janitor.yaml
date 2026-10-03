@@ -1,0 +1,115 @@
+# Weekly safety net for pages (docs/pages.md "Cleanup"): deletes pr/ and issue/
+# objects older than 30 days, catching anything a repo's own pages-cleanup
+# workflow missed (a PR closed while the runner was down, a deleted repo).
+# docs/ is deliberately excluded — rendered main-branch docs never expire.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pages-janitor
+  labels:
+    app: pages-janitor
+spec:
+  schedule: "15 4 * * 1"
+  timeZone: Europe/London
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            # NOT app: garage — that label is the garage Service selector.
+            app: pages-janitor
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          priorityClassName: low-priority
+          containers:
+            - name: janitor
+              image: amazon/aws-cli:2.37.5
+              command: ["/bin/sh", "-c"]
+              # Keys never contain whitespace by path convention, so splitting
+              # the text output on tabs/newlines is safe.
+              args:
+                - |
+                  set -eu
+                  printf '[default]\ns3 =\n    addressing_style = path\n' > "$AWS_CONFIG_FILE"
+                  CUTOFF=$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)
+                  echo "Deleting pr/ and issue/ objects last modified before $CUTOFF"
+                  # No `|| true` here: a listing failure (rotated/wrong key, Garage
+                  # down, region mismatch) must fail the job, not report a false
+                  # "Deleted 0 object(s)".
+                  LIST=$(aws s3api list-objects-v2 --bucket pages \
+                    --query "Contents[?LastModified<'$CUTOFF'].Key" --output text)
+                  KEYS=$(printf '%s' "$LIST" | tr '\t' '\n' | grep -E '^[^/]+/(pr|issue)/' || true)
+                  # Batch up to 1000 keys per delete-objects call instead of one
+                  # `aws s3 rm` process per object (~1s CLI startup each), so a
+                  # large backlog can't run past activeDeadlineSeconds.
+                  DELETED=0
+                  BATCH=""
+                  COUNT=0
+                  flush() {
+                    if [ "$COUNT" -gt 0 ]; then
+                      aws s3api delete-objects --bucket pages \
+                        --delete "{\"Objects\":[$BATCH]}" >/dev/null
+                      DELETED=$((DELETED + COUNT))
+                    fi
+                    BATCH=""
+                    COUNT=0
+                  }
+                  for key in $KEYS; do
+                    esc=$(printf '%s' "$key" | sed 's/\\/\\\\/g; s/"/\\"/g')
+                    if [ "$COUNT" -gt 0 ]; then BATCH="$BATCH,"; fi
+                    BATCH="$BATCH{\"Key\":\"$esc\"}"
+                    COUNT=$((COUNT + 1))
+                    if [ "$COUNT" -ge 1000 ]; then flush; fi
+                  done
+                  flush
+                  echo "Deleted $DELETED object(s)"
+              env:
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: pages-s3-credentials
+                      key: access-key-id
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: pages-s3-credentials
+                      key: secret-access-key
+                - name: AWS_DEFAULT_REGION
+                  value: garage
+                - name: AWS_ENDPOINT_URL
+                  value: http://garage.default.svc.cluster.local:3900
+                - name: AWS_CONFIG_FILE
+                  value: /tmp/aws-config
+                - name: HOME
+                  value: /tmp
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+                seccompProfile:
+                  type: RuntimeDefault
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}

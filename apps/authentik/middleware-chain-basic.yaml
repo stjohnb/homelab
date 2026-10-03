@@ -1,0 +1,15 @@
+# Variant of authentik-auth for hosts Claws reaches with an Authentik app
+# password as HTTP Basic auth (Grafana and Prometheus only). Authorization must
+# reach the outpost, so it is stripped after ForwardAuth instead of before.
+# Every other host keeps authentik-auth. See docs/authentik.md.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: authentik-auth-basic
+  namespace: default
+spec:
+  chain:
+    middlewares:
+      - name: authentik-strip-authentik-headers
+      - name: authentik-forwardauth
+      - name: authentik-strip-authorization

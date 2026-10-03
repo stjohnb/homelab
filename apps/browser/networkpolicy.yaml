@@ -1,0 +1,67 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: browser-ingress-restricted
+  labels:
+    app: browser
+spec:
+  podSelector:
+    matchLabels:
+      app: browser
+  policyTypes:
+    - Ingress
+  # Applying this policy makes the browser pod default-deny on the pod
+  # network. A new consumer MUST be added to the allow-list below or its
+  # connections will silently time out.
+  ingress:
+    # A bare podSelector means the same namespace (default).
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [claws, growth-engine]
+      ports:
+        - protocol: TCP
+          port: 3000
+    # A single from-peer combining namespaceSelector AND podSelector: two
+    # separate list items would be an OR and admit any pod in claws-sessions
+    # or any claws-workload: session pod in any namespace. These are the
+    # per-session pods Claws launches, which run the Playwright MCP.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: claws-sessions
+          podSelector:
+            matchLabels:
+              claws-workload: session
+      ports:
+        - protocol: TCP
+          port: 3000
+    # Same combined shape again, for claws-agent-<rowId> pods
+    # (claws-workload: agent, CLAWS_WORK_BACKEND=k8s-pod). The launcher
+    # copies the Claws pod's env (minus a deny-list) into the agent pod, so
+    # these pods carry CLAWS_BROWSER_CDP_ENDPOINT and BROWSER_TOKEN; a
+    # browser call from inside a headless run would otherwise hang here with
+    # no RST, same failure mode as the session-pod case above.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: claws-sessions
+          podSelector:
+            matchLabels:
+              claws-workload: agent
+      ports:
+        - protocol: TCP
+          port: 3000
+    # This is what makes the ForwardAuth-gated Ingress reach the pod; without
+    # it the host hangs until the client times out, with no RST.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - protocol: TCP
+          port: 3000
+  # Egress is deliberately unrestricted: the browser has to reach the
+  # internet to render pages.

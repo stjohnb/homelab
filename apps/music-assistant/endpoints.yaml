@@ -1,0 +1,16 @@
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: music-assistant
+subsets:
+  - addresses:
+      # Music Assistant Server add-on on the Home Assistant OS host (#989).
+      # Same box as apps/home-assistant/endpoints.yaml. Host-networked by the
+      # Supervisor, so mDNS Cast discovery and the :8097 stream server sit
+      # directly on the LAN — that is why this is an add-on, not a k3s pod.
+      - ip: 192.168.0.89
+    ports:
+      - name: http
+        port: 8095
+        protocol: TCP

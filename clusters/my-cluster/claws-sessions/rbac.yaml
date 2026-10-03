@@ -1,0 +1,45 @@
+---
+# claws-sessions, not default: create/delete on Secrets in default would let
+# this Role touch claws-config (SSH key, kubeconfig, provider credentials) —
+# apps/claws/rbac.yaml deliberately scopes the existing claws-auth-writer
+# Role to resourceNames: [claws-auth] for the same reason. Session objects
+# here are named claws-session-<id> dynamically by Claws, and headless agent
+# runs (CLAWS_WORK_BACKEND=k8s-pod) use the pods and secrets rules below for
+# their claws-agent-<rowId> Pods and Secrets, so no resourceNames
+# restriction is possible or needed.
+#
+# These are exactly the verbs Claws' /verify session-backend check probes
+# for (claws#3026) — narrowing or widening them turns that check red/green.
+# The work-backend check probes the pods and secrets subset of them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: claws-session-backend
+  namespace: claws-sessions
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, create, delete]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, create, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, create, delete, patch]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, create, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: claws-session-backend
+  namespace: claws-sessions
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: claws-session-backend
+subjects:
+  - kind: ServiceAccount
+    name: claws
+    namespace: default

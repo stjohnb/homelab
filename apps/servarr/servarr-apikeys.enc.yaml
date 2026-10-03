@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: servarr-apikeys
+    namespace: default
+type: Opaque
+stringData:
+    sonarr-api-key: ENC[AES256_GCM,data:21zb8QYXBvtOCpxZcJIBKk/Xf+6taueFGta95yRLQlg=,iv:IsJK3dWEVqcBQp42clxZEAzsYVy/4Mz1G1/4iZOxpas=,tag:We4QuAAZd11kM/GMhu1pKQ==,type:str]
+    radarr-api-key: ENC[AES256_GCM,data:GEp1ho71qrhJ7TJX8BJWRSqlMuF9y+4KG+GHra99JGg=,iv:INCMDCJTpc7qmIi8kf4/K7ECaAkiBKdR52hB6gd0+FY=,tag:DVdFr/CplGjIR38jbI301Q==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age17tuhxkp7ma9xfzpsan63c94qdn4c48v6f0z5uak7updragn8ep9q0y3xfz
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSAwWHBya1ZxUDA0czIyWng4
+            b3B3dllScjVwUGExaWo4SzdjSWFYVWJuSGljClZiSjNaMTN4bTlINkgwMCtFSnVP
+            d2lHOElNTVVESEJYSVI0bFdwRVJSK0UKLS0tIDh4a21XUXA1K0dTNkFlaUM0LzFI
+            ajNZQWpvTllHazd0dHowK0l3QXdwTnMKnjiUYZ+apj1LiaEd87mK2zZa9jPa+Fm0
+            LySjny41FlP6q07yGrNqCySPGrUT2cginWuTzdSJKHeYkCfajHmB6w==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-06-29T14:28:11Z"
+    mac: ENC[AES256_GCM,data:Yw5qQuG3YOdCuLd8qc1Z+YAT+suylIGpoueVllFUIRdhQXnCrVZS3r7Z6rHdgRvift612SNpx8HKYFw6hU5XJJdc3iJYsPxuPF2bynsoQd6VtNqbcWevn7pZjI9eOprvVhL7ZpyY2K9u1FzYrPwDGlCOdcxRY83+j3I6kpmNFH0=,iv:/s0f7L0RG9AxbXyD7N+x0l8ofqXXb84QXe4Q3zcw7oM=,tag:H8hVannLrxDt+d4u9naJTw==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

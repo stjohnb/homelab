@@ -1,0 +1,55 @@
+# pages.home.bstjohn.net: Garage's static-website endpoint. Browsers read
+# published previews here, so it sits behind Authentik ForwardAuth like every
+# other private *.home app. Home-only — no .ext host; the tailnet reaches .home
+# through split DNS.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pages
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default-authentik-auth@kubernetescrd
+spec:
+  ingressClassName: traefik-traefik
+  tls:
+    - hosts:
+        - pages.home.bstjohn.net
+      secretName: wildcard-home-tls
+  rules:
+    - host: pages.home.bstjohn.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: garage
+                port:
+                  number: 3902
+---
+# s3.home.bstjohn.net: Garage's S3 API, used by CI runners to publish. No
+# ForwardAuth: S3 clients cannot complete a browser login, and every request is
+# already authenticated by its SigV4 signature against the pages-publisher key.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: garage-s3
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik-traefik
+  tls:
+    - hosts:
+        - s3.home.bstjohn.net
+      secretName: wildcard-home-tls
+  rules:
+    - host: s3.home.bstjohn.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: garage
+                port:
+                  number: 3900

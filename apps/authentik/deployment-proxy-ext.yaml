@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authentik-proxy-ext
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: authentik-proxy-ext
+  template:
+    metadata:
+      labels:
+        app: authentik-proxy-ext
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: critical-infrastructure
+      enableServiceLinks: false
+      containers:
+        - name: proxy
+          # Authentik YYYY.M trains cannot be skipped (lifecycle/migrate.py ensure_allowed_version) — bump one train at a time, see docs/authentik.md "Upgrades" (#1596)
+          image: ghcr.io/goauthentik/proxy:2026.8.3
+          ports:
+            - containerPort: 9000
+              name: http
+            - containerPort: 9300
+              name: metrics
+          env:
+            - name: AUTHENTIK_HOST
+              value: http://authentik-server.default.svc.cluster.local:9000
+            - name: AUTHENTIK_HOST_BROWSER
+              value: https://auth.ext.bstjohn.net
+            - name: AUTHENTIK_INSECURE
+              value: "true"
+            - name: AUTHENTIK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: EXT_OUTPOST_TOKEN
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # The outpost does not bind :9000 until it has fetched its config from
+          # authentik-server, so a bare liveness probe killed it ~50s into every cold
+          # start — including at 13:52:28 on the 2026-09-16 node reboot, the same second
+          # it finished loading all 13 .ext applications (#1419). The startupProbe holds
+          # liveness and readiness off for up to 5 minutes while the server comes up.
+          startupProbe:
+            httpGet:
+              path: /outpost.goauthentik.io/ping
+              port: 9000
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /outpost.goauthentik.io/ping
+              port: 9000
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /outpost.goauthentik.io/ping
+              port: 9000
+            periodSeconds: 10

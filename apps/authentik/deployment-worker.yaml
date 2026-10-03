@@ -1,0 +1,183 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authentik-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: authentik-worker
+  template:
+    metadata:
+      labels:
+        app: authentik-worker
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: standard
+      enableServiceLinks: false
+      containers:
+        - name: authentik
+          # Authentik YYYY.M trains cannot be skipped (lifecycle/migrate.py ensure_allowed_version) — bump one train at a time, see docs/authentik.md "Upgrades" (#1596)
+          image: ghcr.io/goauthentik/server:2026.8.3
+          args: ["worker"]
+          ports:
+            - containerPort: 9000
+              name: http
+            - containerPort: 9300
+              name: metrics
+          env:
+            - name: AUTHENTIK_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: AUTHENTIK_SECRET_KEY
+            - name: AUTHENTIK_POSTGRESQL__HOST
+              value: postgres
+            - name: AUTHENTIK_POSTGRESQL__USER
+              value: authentik
+            - name: AUTHENTIK_POSTGRESQL__NAME
+              value: authentik
+            - name: AUTHENTIK_POSTGRESQL__PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: PG_PASS
+            - name: MEALIE_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: MEALIE_OIDC_CLIENT_SECRET
+            - name: JELLYFIN_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: JELLYFIN_OIDC_CLIENT_SECRET
+            - name: JELLYSEERR_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: JELLYSEERR_OIDC_CLIENT_SECRET
+            - name: SEERR_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: SEERR_OIDC_CLIENT_SECRET
+            - name: HEADLAMP_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: HEADLAMP_OIDC_CLIENT_SECRET
+            - name: PROXMOX_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: PROXMOX_OIDC_CLIENT_SECRET
+            - name: BIN_SCRAPER_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: BIN_SCRAPER_OIDC_CLIENT_SECRET
+            - name: CLAWS_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: CLAWS_OIDC_CLIENT_SECRET
+            - name: FORGEJO_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: FORGEJO_OIDC_CLIENT_SECRET
+            - name: HOME_ASSISTANT_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: HOME_ASSISTANT_OIDC_CLIENT_SECRET
+            - name: REGISTRY_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: REGISTRY_OIDC_CLIENT_SECRET
+            - name: GARDEN_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: GARDEN_OIDC_CLIENT_SECRET
+            - name: AUTHENTIK_EXT_OUTPOST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: EXT_OUTPOST_TOKEN
+            - name: AUTHENTIK_CLAWS_READER_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: CLAWS_READER_APP_PASSWORD
+            - name: AUTHENTIK_CLAWS_ADMIN_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: CLAWS_ADMIN_APP_PASSWORD
+            - name: AUTHENTIK_PROD_OUTPOST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: PROD_OUTPOST_TOKEN
+            # Upstream defaults, pinned so an image bump cannot silently raise
+            # the worker's Postgres footprint (#1245). One process x two threads
+            # is where the 9 steady-state connections come from. Do not lower
+            # threads to 1: it serialises the queue and slows recovery from #936.
+            - name: AUTHENTIK_WORKER__PROCESSES
+              value: "1"
+            - name: AUTHENTIK_WORKER__THREADS
+              value: "2"
+            - name: AUTHENTIK_OUTPOSTS__DISCOVER
+              value: "false"
+          volumeMounts:
+            - name: blueprints
+              mountPath: /blueprints/custom
+          # `ak healthcheck` in worker mode only checks the worker PID file — it never
+          # touches PostgreSQL, so a worker holding dead DB connections stayed Ready for
+          # 15h during the 2026-08-25 NAS outage (#936). Since Authentik 2026.8, port
+          # 9000 is the Rust `ak-axum` worker server (upstream src/worker/healthcheck.rs),
+          # which routes only /-/health/live/ and /-/health/ready/ — trailing slash
+          # required, everything else (including `/`, which the pre-2026.8 Python
+          # healthcheck middleware answered) returns 404. That 404 is what killed
+          # the healthy worker every ~5 min after the 2026.8.3 bump in #1620.
+          # /-/health/ready/ runs SELECT 1 against PostgreSQL and then asks the Python
+          # worker whether it is ready; /-/health/live/ only checks the worker process.
+          # Re-verify these paths against the running container on every Authentik
+          # train bump: `kubectl logs deploy/authentik-worker` logs each probe's path
+          # and status under target authentik_axum::tracing.
+          startupProbe:
+            httpGet:
+              path: /-/health/live/
+              port: 9000
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /-/health/live/
+              port: 9000
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /-/health/ready/
+              port: 9000
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+      volumes:
+        - name: blueprints
+          configMap:
+            name: authentik-blueprints

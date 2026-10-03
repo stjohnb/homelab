@@ -1,0 +1,115 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unifi-backup-script
+  labels:
+    app: unifi
+data:
+  backup.sh: |
+    #!/bin/sh
+    # Nightly settings backup of the UniFi Network console to NFS.
+    # See docs/config-backups.md, "UniFi console backup". Issue #1187.
+    set -eu
+
+    DEST=/media/backups/unifi
+    RETAIN=14
+    STAMP="$(date +%Y%m%d-%H%M%S)"
+    COOKIES=/tmp/cookies.txt
+    HDRS=/tmp/login-headers.txt
+
+    # Fail loudly if the NFS mount is absent — writing the "backup" into the
+    # pod's own filesystem would be silently useless. Same guard as backup.sh
+    # in apps/config-backup/script-configmap.yaml.
+    grep -q " /media " /proc/mounts || { echo "ERROR: /media is not mounted"; exit 1; }
+    mkdir -p "$DEST"
+
+    # The credential is interpolated into a JSON body via printf. A quote or
+    # backslash would produce malformed JSON and a confusing 400.
+    case "$UNIFI_PASS" in
+      *[\"\\]*) echo "ERROR: password contains a quote or backslash; regenerate it alphanumeric"; exit 1 ;;
+    esac
+
+    # -k: the console presents a self-signed cert on its LAN IP, the same
+    # reason apps/unifi/servers-transport.yaml sets insecureSkipVerify.
+    # --retry: the console answers a transient HTTP 503 when it is busy — on
+    # 2026-09-10 11:31 a second backup run started in the same second and this
+    # job died with curl exit 22 and no other output (#1280). curl's built-in
+    # transient list (timeouts and HTTP 408, 429, 500, 502, 503, 504) is exactly
+    # what should be retried; the HTTP half of that list only takes effect
+    # because every call below passes -f. Do NOT add --retry-all-errors or
+    # --retry-connrefused: a 401/403 means the fleet-backup admin lacks Full
+    # Management and must fail fast (docs/config-backups.md "Permissions
+    # gotcha"), and a refused connection at 02:15 means the console is down,
+    # which is the signal we want. --retry-max-time 60 stops a new attempt
+    # starting more than 60s after the call began, keeping the whole job inside
+    # activeDeadlineSeconds: 1200.
+    CURL="curl -sS -k --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 5 --retry-max-time 60 -c $COOKIES -b $COOKIES"
+
+    # 1. Log in. UniFi OS returns the CSRF token as an x-csrf-token RESPONSE
+    #    HEADER, not in the JSON body.
+    echo "step 1/3: login to $UNIFI_URL"
+    $CURL -f -D "$HDRS" -o /tmp/login.json \
+      -H 'Content-Type: application/json' \
+      --data-binary "$(printf '{"username":"%s","password":"%s","remember":true}' "$UNIFI_USER" "$UNIFI_PASS")" \
+      "$UNIFI_URL/api/auth/login"
+
+    CSRF="$(grep -i '^x-csrf-token:' "$HDRS" | tail -n1 | cut -d' ' -f2- | tr -d '\r')"
+    [ -n "$CSRF" ] || { echo "ERROR: login returned no x-csrf-token header"; exit 1; }
+
+    # 2. Ask the Network application for a settings-only backup.
+    #    days:"0" = settings only; -1 would include months of stats.
+    echo "step 2/3: requesting settings-only backup"
+    $CURL -f -o /tmp/cmd.json \
+      -H "X-Csrf-Token: $CSRF" -H 'Content-Type: application/json' \
+      --data-binary '{"cmd":"backup","days":"0"}' \
+      "$UNIFI_URL/proxy/network/api/s/default/cmd/backup"
+
+    URL_PATH="$(sed -n 's|.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*|\1|p' /tmp/cmd.json | head -n1)"
+    if [ -z "$URL_PATH" ]; then
+      echo "ERROR: console returned no backup url:"; cat /tmp/cmd.json; exit 1
+    fi
+    # The url is site-relative (/dl/backup/<file>.unf) and needs the UniFi OS
+    # proxy prefix.
+    case "$URL_PATH" in
+      /proxy/*) ;;
+      /*)  URL_PATH="/proxy/network$URL_PATH" ;;
+      *)   URL_PATH="/proxy/network/$URL_PATH" ;;
+    esac
+
+    # 3. Download to a dotfile on NFS, verify, then rename into place, so a
+    #    truncated transfer can never be mistaken for a backup.
+    OUT="$DEST/unifi-config-$STAMP.unf"
+    PART="$DEST/.unifi-config-$STAMP.unf.partial"
+    rm -f "$PART"
+    echo "step 3/3: downloading $URL_PATH"
+    $CURL -f -H "X-Csrf-Token: $CSRF" -o "$PART" "$UNIFI_URL$URL_PATH"
+
+    BYTES="$(wc -c < "$PART" | tr -d ' ')"
+    if [ "$BYTES" -lt "$MIN_BYTES" ]; then
+      echo "ERROR: downloaded backup is $BYTES bytes (< $MIN_BYTES) — refusing to keep it"
+      head -c 200 "$PART" || true
+      rm -f "$PART"; exit 1
+    fi
+    # A .unf is a ZIP-like binary. HTML or JSON here means an error page.
+    case "$(head -c 1 "$PART")" in
+      '<'|'{') echo "ERROR: console returned text, not a backup:"; head -c 200 "$PART"; rm -f "$PART"; exit 1 ;;
+    esac
+
+    mv "$PART" "$OUT"
+    echo "Wrote $OUT ($BYTES bytes)"
+
+    # No console-side cleanup step. The generated file is /dl/backup/<network
+    # version>.unf — one fixed name that each run overwrites, never listed on
+    # the console's Backups page (that list is autobackups only), so nothing
+    # accumulates. Network 10.6.101 has no delete command either: a
+    # {"cmd":"delete-backup"} POST answers 404 api.err.NotFound, byte-identical
+    # to the reply for a deliberately bogus cmd. See #1202 and
+    # docs/config-backups.md, "The console-side copy".
+
+    $CURL -f -o /dev/null -X POST -H "X-Csrf-Token: $CSRF" "$UNIFI_URL/api/auth/logout" || true
+
+    # 4. Retention — same RETAIN convention as config-backup.
+    ( cd "$DEST" && ls -t ./*.unf 2>/dev/null | tail -n "+$((RETAIN + 1))" | xargs -r rm -v )
+    rm -f "$DEST"/.*.partial || true
+    echo "Current UniFi backups:"; ls -lht "$DEST"/*.unf

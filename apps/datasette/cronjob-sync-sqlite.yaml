@@ -1,0 +1,170 @@
+---
+# Nightly SQLite snapshots of the media apps behind Datasette. See
+# docs/datasette.md "SQLite sources".
+#
+# Separate from the 03:30 Postgres datasette-sync so a failure in one never
+# blocks the other. Same initContainer-then-restart shape: a failed source
+# keeps its previous file, sources that did publish still trigger the rollout
+# restart, and the Job then fails so the stale alert path stays honest.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: datasette-sync-sqlite
+  labels:
+    app: datasette-sync-sqlite
+spec:
+  # 02:35, not 03:30. Sonarr/Radarr/Bazarr are read from config-backup's
+  # archives on the hard-mounted media-pvc, so this needs the NAS awake
+  # (~02:03-03:03, docs/config-backups.md "Why these times"). After
+  # config-backup's 02:30 deadline so no archive is mid-write; 02:35 + the
+  # 1200s deadline finishes by 02:55, clear of the 03:03 poweroff.
+  schedule: "35 2 * * *"
+  timeZone: Europe/London
+  startingDeadlineSeconds: 600
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1200
+      # 48h, not shorter: the -job-failed Grafana rule reads
+      # kube_job_status_failed, which vanishes with the Job object.
+      ttlSecondsAfterFinished: 172800
+      template:
+        metadata:
+          labels:
+            # Deliberately NOT app: datasette-sync, which the Postgres
+            # NetworkPolicy admits to port 5432; this job never needs Postgres.
+            app: datasette-sync-sqlite
+        spec:
+          serviceAccountName: datasette-sync
+          restartPolicy: Never
+          enableServiceLinks: false
+          priorityClassName: low-priority
+          # Must match the datasette Deployment: datasette-data is an RWO
+          # local-path volume mounted by both workloads, which is legal only
+          # while they share a node. The prowlarr/seerr/jellyfin config PVCs
+          # are local-path volumes on the same node.
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: node-role.kubernetes.io/gpu
+                        operator: DoesNotExist
+                      - key: node-role.kubernetes.io/storage
+                        operator: DoesNotExist
+          initContainers:
+            - name: snapshot
+              image: python:3.14.8-slim
+              command:
+                - /bin/bash
+                - /scripts/sync-sqlite.sh
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 1000m
+                  memory: 2Gi
+              # Root with DAC bypass, mirroring config-backup-players: the app
+              # databases are owned by uid 1000/0, the online backup must create
+              # a -shm beside them, and the -wal/-shm are chowned back after.
+              securityContext:
+                runAsUser: 0
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+                  add:
+                    - DAC_READ_SEARCH
+                    - DAC_OVERRIDE
+                    - CHOWN
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                - name: work
+                  mountPath: /work
+                - name: scripts
+                  mountPath: /scripts
+                - name: tmp
+                  mountPath: /tmp
+                - name: media
+                  mountPath: /media
+                  readOnly: true
+                # Read-write on purpose: SQLite's online backup creates a -shm
+                # file next to the source database (docs/config-backups.md).
+                - name: prowlarr-config
+                  mountPath: /config/prowlarr
+                - name: seerr-config
+                  mountPath: /config/seerr
+                - name: jellyfin-config
+                  mountPath: /config/jellyfin
+          containers:
+            # Datasette enumerates *.db at startup and holds their fds, so the
+            # new snapshot is only picked up by a restart. The snapshot step
+            # always exits 0 and leaves /tmp/published and /tmp/failed: restart
+            # if anything published, then fail the Job if anything failed.
+            - name: restart-datasette
+              image: alpine/k8s:1.37.1
+              env:
+                - name: HOME
+                  value: /tmp
+                - name: KUBECACHEDIR
+                  value: /tmp/kubecache
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  if [ -s /tmp/published ]; then
+                    kubectl rollout restart deployment/datasette -n default || exit 1
+                  fi
+                  if [ -s /tmp/failed ]; then
+                    echo "FAILED sources: $(tr '\n' ' ' < /tmp/failed)"
+                    exit 1
+                  fi
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 65534
+                runAsGroup: 65534
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: datasette-data
+            - name: work
+              emptyDir:
+                sizeLimit: 4Gi
+            - name: scripts
+              configMap:
+                name: datasette-sync-script
+            - name: tmp
+              emptyDir: {}
+            # The hard-mounted media-pvc, never media-soft-pvc, matching the
+            # backup jobs whose archives it reads.
+            - name: media
+              persistentVolumeClaim:
+                claimName: media-pvc
+            - name: prowlarr-config
+              persistentVolumeClaim:
+                claimName: prowlarr-local-config-pvc
+            - name: seerr-config
+              persistentVolumeClaim:
+                claimName: seerr-config
+            - name: jellyfin-config
+              persistentVolumeClaim:
+                claimName: jellyfin-config

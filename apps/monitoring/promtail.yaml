@@ -1,0 +1,56 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: promtail
+  namespace: default
+spec:
+  interval: 1h
+  # disableWait on all three actions: this is a 3-node DaemonSet, and Helm's
+  # --wait needs numberReady >= desired - maxUnavailable (3 - 1 = 2). k3s-nas
+  # (storage) and ryzen (GPU) power off daily; with both down numberReady is 1
+  # and the check can never pass — the same failure mode documented for
+  # kube-prometheus-stack in docs/monitoring.md. Loki keeps normal waiting
+  # since it is a 1-replica StatefulSet on the always-on node.
+  install:
+    disableWait: true
+    remediation:
+      retries: 3
+  upgrade:
+    disableWait: true
+    remediation:
+      retries: 3
+  rollback:
+    disableWait: true
+  chart:
+    spec:
+      chart: promtail
+      version: "6.17.1"
+      sourceRef:
+        kind: HelmRepository
+        name: grafana
+        namespace: flux-system
+      interval: 12h
+  # Promtail is in upstream maintenance mode (superseded by Grafana Alloy).
+  # Still the simplest fit for a small three-node cluster; migrate to Alloy
+  # in a separate PR when the chart goes EOL.
+  values:
+    priorityClassName: standard
+    config:
+      clients:
+        - url: http://loki.default.svc.cluster.local:3100/loki/api/v1/push
+    # The chart's default tolerations only cover master/control-plane taints.
+    # k3s-nas carries node-role.kubernetes.io/storage=true:NoSchedule and
+    # ryzen carries node-role.kubernetes.io/gpu=true:NoSchedule — without this
+    # the DaemonSet never reaches 3/3. Same approach as prometheus-node-exporter.
+    tolerations:
+      - operator: Exists
+        effect: NoSchedule
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 200Mi
+    serviceMonitor:
+      enabled: false

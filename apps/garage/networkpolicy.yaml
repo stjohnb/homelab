@@ -1,0 +1,46 @@
+# Admits only the callers Garage actually has. Adding a new in-cluster
+# consumer (another namespace, or a pod that must reach the web port directly)
+# means adding it here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: garage-ingress-restricted
+  labels:
+    app: garage
+spec:
+  podSelector:
+    matchLabels:
+      app: garage
+  policyTypes:
+    - Ingress
+  ingress:
+    # Web endpoint: Traefik only. This is what makes the Authentik ForwardAuth
+    # on pages.home.bstjohn.net unbypassable from inside the cluster.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - protocol: TCP
+          port: 3902
+    # S3 API (SigV4-authenticated): Traefik (s3.home.bstjohn.net for CI
+    # runners), any pod in default (Claws, pages-janitor, migration runner),
+    # and claws-sessions (Claws forwards its pod env into k8s-pod agent pods).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+        - podSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: claws-sessions
+      ports:
+        - protocol: TCP
+          port: 3900
+    # Admin API (bearer-token authenticated; /health is open): the migration
+    # runner mints the bucket and key through it, Gatus probes /health.
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 3903

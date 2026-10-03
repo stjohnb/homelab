@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: truenas-gate
+  labels:
+    app: truenas-gate
+spec:
+  selector:
+    app: truenas-gate
+  ports:
+    - port: 80
+      targetPort: 80

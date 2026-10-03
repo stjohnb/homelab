@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: whyrr
+  labels:
+    app: whyrr
+spec:
+  type: ClusterIP
+  selector:
+    app: whyrr
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http

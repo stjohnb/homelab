@@ -1,0 +1,35 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: garden
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik-traefik
+  tls:
+  - hosts:
+    - garden.home.bstjohn.net
+    - garden.ext.bstjohn.net
+    secretName: wildcard-home-tls
+  rules:
+  - host: garden.home.bstjohn.net
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: garden
+            port:
+              number: 3000
+  - host: garden.ext.bstjohn.net
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: garden
+            port:
+              number: 3000

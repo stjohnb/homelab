@@ -1,0 +1,333 @@
+# Nightly Postgres -> SQLite export pipeline for Datasette. See docs/datasette.md.
+#
+# The controlling invariant: the raw export is written to an emptyDir (/work),
+# redacted there, and only a `VACUUM INTO` copy of the redacted database is ever
+# written to the served PVC. VACUUM INTO copies live pages only, so overwritten
+# values cannot survive in freelist pages of the served file.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: datasette-sync-script
+  labels:
+    app: datasette-sync
+data:
+  sync.sh: |
+    set -eu
+    PGHOST=postgres; PGPORT=5432
+    export TMPDIR=/tmp HOME=/tmp PYTHONUSERBASE=/tmp/py PATH="/tmp/py/bin:$PATH"
+
+    # readOnlyRootFilesystem, so install into the writable /tmp emptyDir. Pinned;
+    # fleet-infra builds no images (#1189) so there is nothing to bake this into.
+    # NOT the [postgresql] extra: it pulls plain psycopg2, which publishes no
+    # Linux wheels and would need a compiler and pg_config to build here.
+    # psycopg2-binary provides the same `psycopg2` module from a manylinux wheel.
+    # db-to-sqlite==1.5 leaves SQLAlchemy unpinned. SQLAlchemy 2.1.0 (2026-09-24)
+    # made bare postgresql:// URLs resolve to psycopg (v3) instead of psycopg2,
+    # causing ModuleNotFoundError since only psycopg2-binary is installed (#1596).
+    # Bump this pin by hand only after confirming the +psycopg2 URLs below still work.
+    pip install --no-cache-dir --user --quiet 'db-to-sqlite==1.5' 'psycopg2-binary==2.9.11' 'SQLAlchemy==2.0.54'
+
+    # k3s adds a new pod's IP to the netpol ipset a moment AFTER start, so a
+    # one-shot Job's first connection is refused for ~1s (docs/postgres.md).
+    i=0
+    until (exec 3<>/dev/tcp/$PGHOST/$PGPORT) 2>/dev/null; do
+      i=$((i+1)); [ "$i" -lt 60 ] || { echo "postgres never came up"; exit 1; }
+      sleep 2
+    done
+
+    # Explicit driver is load-bearing (see pip install note above).
+    URL="postgresql+psycopg2://postgres:${PGPASSWORD}@${PGHOST}:${PGPORT}"
+    DBS=$(python -c "
+    import os
+    from sqlalchemy import create_engine, text
+    e = create_engine('postgresql+psycopg2://postgres:%s@postgres:5432/postgres' % os.environ['PGPASSWORD'])
+    with e.connect() as c:
+        print(' '.join(r[0] for r in c.execute(text(
+          \"select datname from pg_database where datistemplate=false \"
+          \"and datname <> 'postgres' order by 1\"))))
+    ")
+    echo "databases: $DBS"
+
+    FAILED=""
+    for db in $DBS; do
+      # Skipped: huge, low-value or unmappable tables. Nothing FK-references any of
+      # them (verified), so db-to-sqlite's FK pass still succeeds. tasklog is also
+      # skipped because task tracebacks can quote credential material.
+      case "$db" in
+        immich)    EXTRA="--skip smart_search --skip face_search --skip geodata_places --skip naturalearth_countries" ;;
+        authentik) EXTRA="--skip authentik_tasks_tasklog" ;;
+        claws)     EXTRA="--skip job_logs" ;;
+        *)         EXTRA="" ;;
+      esac
+      echo "=== $db ==="
+      rm -f "/work/$db.db" "/data/$db.db.new"
+      # $EXTRA unquoted on purpose - word-splitting is the point.
+      if db-to-sqlite "$URL/$db" "/work/$db.db" --all $EXTRA \
+         && python /scripts/redact.py "/work/$db.db" "$db" \
+         && python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"VACUUM INTO '\"+sys.argv[2]+\"'\")" "/work/$db.db" "/data/$db.db.new"; then
+        mv -f "/data/$db.db.new" "/data/$db.db"   # .db.new is not matched by datasette's *.db scan
+      else
+        echo "ERROR: export of $db failed"; FAILED="$FAILED $db"
+        rm -f "/data/$db.db.new"
+      fi
+      rm -f "/work/$db.db"
+    done
+    [ -z "$FAILED" ] || { echo "FAILED databases:$FAILED"; exit 1; }
+    ls -lh /data
+  sync-sqlite.sh: |
+    # Nightly SQLite snapshots of the media apps (datasette-sync-sqlite). Same
+    # invariant as sync.sh: raw copies stay in /work, only a redacted VACUUM
+    # INTO copy reaches /data. Every source is isolated: one failure is logged,
+    # its previous snapshot stays served, and the loop carries on.
+    set -u
+    export TMPDIR=/tmp HOME=/tmp
+    FAILED=""
+    # Markers on the shared /tmp emptyDir: this script always exits 0 so the
+    # restart container can pick up what did publish, then fail the Job itself.
+    rm -f /tmp/published /tmp/failed; : > /tmp/published; : > /tmp/failed
+
+    fail() { echo "ERROR: $1 failed: $2"; FAILED="$FAILED $1"; echo "$1" >> /tmp/failed; rm -f "/data/$1.db.new"; }
+
+    # VACUUM INTO SRC DST. The copies carry the source's WAL header;
+    # journal_mode=DELETE on the served file means Datasette never needs a
+    # -shm beside it.
+    vacuum_into() {
+      python - "$1" "$2" <<'PY'
+    import sqlite3, sys
+    c = sqlite3.connect(sys.argv[1]); c.execute("VACUUM INTO ?", (sys.argv[2],)); c.close()
+    n = sqlite3.connect(sys.argv[2]); n.execute("PRAGMA journal_mode=DELETE"); n.close()
+    PY
+    }
+
+    # publish NAME KEY SRC: redact SRC (a consistent copy under /work) with
+    # redact.py's KEY rules and swap it onto /data as NAME.db.
+    publish() {
+      name=$1 key=$2 src=$3
+      rm -f "/work/$name.db" "/work/$name.db-wal" "/work/$name.db-shm" "/data/$name.db.new"
+      if mv -f "$src" "/work/$name.db" \
+         && python /scripts/redact.py "/work/$name.db" "$key" \
+         && vacuum_into "/work/$name.db" "/data/$name.db.new"; then
+        mv -f "/data/$name.db.new" "/data/$name.db"   # .db.new is not matched by datasette's *.db scan
+        echo "published $name.db"
+        echo "$name" >> /tmp/published
+      else
+        fail "$name" "redact/publish"
+      fi
+      rm -f "/work/$name.db" "/work/$name.db-wal" "/work/$name.db-shm"
+    }
+
+    # Servarr apps live on k3s-nas, so their databases come from the nightly
+    # config-backup archives, whose .db members are already SQLite online-backup
+    # copies. Member names follow backup.sh's `tar -C "$stage" .`; renaming
+    # them or the archive path breaks this (docs/config-backups.md).
+    MAX_AGE=172800   # an archive older than 2 days fails the source rather than serving stale data
+    if grep -q " /media " /proc/mounts; then
+      for entry in sonarr:./sonarr.db radarr:./radarr.db bazarr:./db/bazarr.db; do
+        app=${entry%%:*} member=${entry#*:}
+        echo "=== $app ==="
+        archive=$(ls -t /media/backups/config/$app/$app-config-*.tar.gz 2>/dev/null | head -1)
+        if [ -z "$archive" ]; then fail "$app" "no archive under /media/backups/config/$app"; continue; fi
+        age=$(( $(date +%s) - $(stat -c %Y "$archive") ))
+        if [ "$age" -gt "$MAX_AGE" ]; then fail "$app" "newest archive $archive is ${age}s old"; continue; fi
+        echo "archive: $archive (${age}s old)"
+        rm -rf "/work/x-$app"; mkdir -p "/work/x-$app"
+        if tar -xzf "$archive" -C "/work/x-$app" --no-same-owner "$member"; then
+          publish "$app" "$app" "/work/x-$app/$member"
+        else
+          fail "$app" "extracting $member from $archive"
+        fi
+        rm -rf "/work/x-$app"
+      done
+    else
+      for app in sonarr radarr bazarr; do fail "$app" "/media is not mounted"; done
+    fi
+
+    # k3s-resident apps are mounted directly and copied with the online backup
+    # API. name:redact-key:source:uid:gid (uid:gid owns the app's -wal/-shm).
+    for entry in \
+      prowlarr:prowlarr:/config/prowlarr/prowlarr.db:1000:1000 \
+      seerr:seerr:/config/seerr/db/db.sqlite3:1000:1000 \
+      jellyfin:jellyfin:/config/jellyfin/data/jellyfin.db:0:0 \
+      jellyfin-library:jellyfin:/config/jellyfin/data/library.db:0:0
+    do
+      IFS=: read -r name key src uid gid <<< "$entry"
+      echo "=== $name ==="
+      if [ ! -f "$src" ]; then
+        # Jellyfin 10.11 merged library.db into jellyfin.db (left as library.db.old).
+        if [ "$name" = jellyfin-library ]; then echo "WARN: $src absent, skipping"; continue; fi
+        fail "$name" "$src missing"; continue
+      fi
+      rm -f "/work/x-$name.db"
+      if python /scripts/snapshot.py "$src" "/work/x-$name.db"; then
+        publish "$name" "$key" "/work/x-$name.db"
+      else
+        fail "$name" "online backup of $src"
+        rm -f "/work/x-$name.db"
+      fi
+      # This runs as root and may have recreated -wal/-shm; hand them back so
+      # the app can still write after a restart (same as config-backup).
+      find "$(dirname "$src")" -maxdepth 1 \( -name '*-wal' -o -name '*-shm' \) -exec chown "$uid:$gid" {} +
+    done
+
+    ls -lh /data
+    [ -z "$FAILED" ] || echo "FAILED sources:$FAILED (Job fails after the restart step)"
+    exit 0
+  snapshot.py: |
+    # Consistent copy of a live (WAL) SQLite database via the online backup API;
+    # a plain cp of a live WAL database can be torn.
+    import sqlite3, sys
+
+    try:
+        src = sqlite3.connect(sys.argv[1], timeout=10)
+        dst = sqlite3.connect(sys.argv[2])
+        src.backup(dst)
+        dst.close(); src.close()
+    except sqlite3.Error as e:
+        print("snapshot of %s failed: %s" % (sys.argv[1], e), file=sys.stderr)
+        sys.exit(1)
+  redact.py: |
+    import re, sqlite3, sys
+
+    path, db = sys.argv[1], sys.argv[2]
+
+    # Layer 1: tables whose entire contents are credential/session material.
+    # Rows are DELETEd, not skipped at export, so foreign keys stay intact.
+    PURGE = {
+        "authentik": [
+            "authentik_core_token", "authentik_core_session",
+            "authentik_core_authenticatedsession", "authentik_flows_flowtoken",
+            "authentik_providers_oauth2_accesstoken",
+            "authentik_providers_oauth2_refreshtoken",
+            "authentik_providers_oauth2_authorizationcode",
+            "authentik_providers_oauth2_devicetoken",
+            "authentik_providers_proxy_proxysession",
+            "authentik_providers_rac_connectiontoken",
+            "authentik_providers_saml_samlsession",
+            "authentik_crypto_certificatekeypair", "authentik_enterprise_license",
+            "authentik_policies_unique_password_userpasswordhistory",
+            "authentik_stages_authenticator_totp_totpdevice",
+            "authentik_stages_authenticator_static_statictoken",
+            "authentik_stages_authenticator_sms_smsdevice",
+            "authentik_stages_authenticator_email_emaildevice",
+            "authentik_stages_authenticator_webauthn_webauthndevice",
+            "django_session", "django_postgres_cache_cacheentry",
+            "django_channels_postgres_groupchannel",
+        ],
+        "forgejo": [
+            "session", "forgejo_auth_token", "two_factor", "webauthn_credential",
+            "oauth2_grant", "oauth2_authorization_code", "external_login_user",
+            "push_mirror", "hook_task", "system_setting", "email_hash",
+        ],
+        "immich": ["session", "api_key"],
+        # Media-app SQLite snapshots (sync-sqlite.sh). Config holds the app's
+        # own key/value settings; Commands/PendingReleases carry indexer
+        # payloads and download URLs.
+        "sonarr": ["Config", "Commands", "PendingReleases"],
+        "radarr": ["Config", "Commands", "PendingReleases"],
+        "prowlarr": ["Config", "Commands", "PendingReleases"],
+        "jellyfin": ["ApiKeys", "Devices"],
+        "seerr": ["session", "user_push_subscription"],
+        # Apprise URLs embed bot tokens / webhook secrets in the path.
+        "bazarr": ["table_settings_notifier"],
+    }
+
+    # Layer 1b: credential-bearing columns whose names Layer 2 cannot see. The
+    # servarr apps keep indexer/download-client/notification/application API
+    # keys inside JSON "Settings" columns. Applied where table and column exist.
+    SERVARR_SETTINGS = [(t, "Settings", "'[redacted]'") for t in (
+        "Indexers", "DownloadClients", "Notifications", "ImportLists",
+        "NetImport", "Metadata", "Applications", "IndexerProxies")] + [
+        ("IndexerStatus", "LastRssSyncReleaseInfo", "'[redacted]'")]
+    OVERWRITE = {
+        "sonarr": SERVARR_SETTINGS,
+        "radarr": SERVARR_SETTINGS,
+        "prowlarr": SERVARR_SETTINGS,
+        "jellyfin": [("Users", "Password", "NULL"), ("Users", "EasyPassword", "NULL")],
+        # Layer 2 already matches these; listed so they never depend on it.
+        "seerr": [("user", "jellyfinAuthToken", "'[redacted]'"),
+                  ("user", "plexToken", "'[redacted]'")],
+    }
+
+    # Layer 3: value scrub for credentials embedded in free text, e.g. the
+    # Prowlarr API key in History.Data download URLs (".../download?apikey=").
+    # Servarr databases only: they are small, and the cost is a regex per value.
+    SCRUB_VALUES = {"sonarr", "radarr", "prowlarr", "bazarr"}
+    SCRUB = [
+        (re.compile(r"(?i)(?<![a-z0-9])([a-z_]*(?:apikey|api_key|passkey|rsskey"
+                    r"|torrent_pass|token|secret|password|auth))=[^&\"'\s<\\]+"),
+         r"\1=[redacted]"),
+        (re.compile(r"(?i)\"(apikey|api_key|passkey|rsskey|token|secret|password"
+                    r"|accesstoken)\"\s*:\s*\"[^\"]*\""), r'"\1":"[redacted]"'),
+    ]
+
+    def scrub(v):
+        if not isinstance(v, str):
+            return v
+        for pattern, repl in SCRUB:
+            v = pattern.sub(repl, v)
+        return v
+
+    # Layer 2: name-pattern redaction, applied to EVERY table of EVERY database so
+    # a column added by a future upstream migration is covered with no edit here.
+    # Deliberately errs wide: over-redacting a boolean is cheaper than leaking one
+    # secret. Primary-key and foreign-key columns are never touched (that would
+    # break row identity and Datasette's link navigation).
+    SENSITIVE = re.compile(
+        r"passwd|password|secret|token|salt|hash|credential|cookie|session|nonce"
+        r"|otp|totp|mfa|passcode|scratch|keytab|encrypted|jwt|signature|private"
+        r"|pin_?code|apikey|key$|(^|_)key(_|$)")
+    KEEP = {  # metadata key/value tables: the "key" is a map key, not a secret
+        "immich": {("asset_metadata", "key"), ("asset_metadata_audit", "key"),
+                   ("user_metadata", "key"), ("user_metadata_audit", "key"),
+                   ("system_metadata", "key")},
+        "forgejo": {("user_setting", "setting_key")},
+    }
+
+    conn = sqlite3.connect(path)
+    conn.create_function("scrub", 1, scrub, deterministic=True)
+    purged = cols = overwritten = scrubbed = 0
+
+    def columns(t):
+        return {r[1] for r in conn.execute('PRAGMA table_xinfo("%s")' % t)}
+
+    def overwrite(t, name, value, where):
+        q = 'UPDATE "%s" SET "%s" = %%s WHERE %s' % (t, name, where)
+        try:
+            conn.execute(q % value)
+        except sqlite3.IntegrityError:              # UNIQUE / NOT NULL on the column
+            try:
+                conn.execute(q % "'[redacted-' || rowid || ']'")
+            except sqlite3.OperationalError:        # WITHOUT ROWID table: key on the PK
+                pk = [r[1] for r in conn.execute('PRAGMA table_xinfo("%s")' % t) if r[5]]
+                uniq = " || '-' || ".join('"%s"' % c for c in pk)
+                conn.execute(q % ("'[redacted-' || " + uniq + " || ']'"))
+
+    tables = [r[0] for r in conn.execute(
+        "select name from sqlite_master where type='table' "
+        "and name not like 'sqlite_%'")]
+    for t in PURGE.get(db, []):
+        if t in tables:
+            conn.execute('DELETE FROM "%s"' % t); purged += 1
+    for t, name, value in OVERWRITE.get(db, []):
+        if t in tables and name in columns(t):
+            overwrite(t, name, value, '"%s" IS NOT NULL' % name); overwritten += 1
+    for t in tables:
+        fk = {r[3] for r in conn.execute('PRAGMA foreign_key_list("%s")' % t)}
+        for row in conn.execute('PRAGMA table_xinfo("%s")' % t).fetchall():
+            name, pk, hidden = row[1], row[5], row[6]
+            if pk or hidden or name in fk:          # hidden != 0 => generated col
+                continue
+            if db in SCRUB_VALUES:
+                overwrite(t, name, 'scrub("%s")' % name,
+                          'typeof("%s") = \'text\' AND "%s" <> scrub("%s")' % (name, name, name))
+                scrubbed += 1
+            if (t, name) in KEEP.get(db, set()):
+                continue
+            if not SENSITIVE.search(name.lower()):
+                continue
+            overwrite(t, name, "'[redacted]'", '"%s" IS NOT NULL' % name)
+            cols += 1
+    conn.commit(); conn.close()
+    print("redacted %d columns across %d tables, purged %d tables, overwrote %d "
+          "columns, value-scrubbed %d columns" %
+          (cols, len(tables), purged, overwritten, scrubbed))

@@ -1,0 +1,197 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: immich-db-backup
+  labels:
+    app: immich
+spec:
+  schedule: "0 */6 * * *"
+  timeZone: Europe/London
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      # See apps/unifi/cronjob-backup.yaml: 48h so a fixed failure stops re-alerting.
+      ttlSecondsAfterFinished: 172800
+      activeDeadlineSeconds: 1800
+      backoffLimit: 1
+      # An empty database is a standing condition, not a transient fault — retrying
+      # burns a second pod on an identical failure. The pg-dump container exits 3 for
+      # that case only; FailJob ends the Job on the first such pod and stamps its
+      # Failed condition with reason="PodFailurePolicy". The critical alert excludes
+      # that reason; "Immich Database Is Empty" selects it.
+      # Requires restartPolicy: Never, already set below.
+      podFailurePolicy:
+        rules:
+          - action: FailJob
+            onExitCodes:
+              containerName: pg-dump
+              operator: In
+              values:
+                - 3
+      template:
+        metadata:
+          labels:
+            component: db-backup
+            claws.st-john-software.com/nfs-dependent: "true"
+        spec:
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          # Pinned to the storage node (k3s-nas). The NAS is powered off most
+          # of the time and this job is pointless without its media, so it
+          # must fail cleanly here rather than run without storage. See docs/nas-k3s.md.
+          nodeSelector:
+            node-role.kubernetes.io/storage: "true"
+          tolerations:
+            - key: node-role.kubernetes.io/storage
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          securityContext:
+            fsGroup: 70
+          initContainers:
+            - name: init-backup-dir
+              image: busybox:1.38
+              command: ["sh", "-c", "mkdir -p /media/backups/immich && chown 70:70 /media/backups/immich"]
+              securityContext:
+                runAsUser: 0
+              volumeMounts:
+                - name: media
+                  mountPath: /media
+          containers:
+            - name: pg-dump
+              image: postgres:16-alpine
+              securityContext:
+                runAsUser: 70
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: immich-db-secret
+                      key: password
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+
+                  # logfmt: msg is always quoted; a field value is quoted (with " and \
+                  # escaped) unless it is a bare token, so call sites just use key="$v".
+                  _logesc() { printf '%s' "$1" | tr '\n\t' '  ' | sed 's/[\\"]/\\&/g'; }
+                  log() {
+                    _line="level=$1 msg=\"$(_logesc "$2")\" component=db-backup job=immich-db-backup"
+                    shift 2
+                    for _kv in "$@"; do
+                      _v=${_kv#*=}
+                      case $_v in
+                        ''|*[!A-Za-z0-9._:/@+,-]*) _v="\"$(_logesc "$_v")\"" ;;
+                      esac
+                      _line="$_line ${_kv%%=*}=$_v"
+                    done
+                    printf '%s\n' "$_line"
+                  }
+
+                  BACKUP_DIR="/media/backups/immich"
+                  # Just above the largest observed geodata-only dump (16676452 bytes,
+                  # measured across two months of empty-DB backups — see issue #698).
+                  # A dump at or below this floor carries reference tables only.
+                  MIN_DUMP_BYTES=17000000
+                  PSQL="psql -v ON_ERROR_STOP=1 --host=postgres --username=immich --dbname=immich -tAc"
+
+                  # Wait up to 10 minutes for postgres. Immich is pinned to the same storage
+                  # node, so if this pod mounted NFS the DB should come up too. Unlike the
+                  # previous behaviour, an unreachable DB now FAILS rather than exiting 0 —
+                  # an extended outage must be visible, not a silent skip.
+                  log info "checking postgres availability" host=postgres
+                  ATTEMPT=1
+                  until pg_isready --host=postgres --username=immich --timeout=5 --quiet; do
+                    if [ "${ATTEMPT}" -ge 10 ]; then
+                      log error "postgres unreachable" attempts=10 waited_s=600
+                      exit 1
+                    fi
+                    log info "postgres not ready, waiting" attempt="${ATTEMPT}" max_attempts=10 wait_s=60
+                    ATTEMPT=$((ATTEMPT + 1))
+                    sleep 60
+                  done
+
+                  # Content assertion. pg_dump exits 0 on an empty database, so exit status
+                  # alone is not evidence of a usable backup (issue #698: three months of
+                  # geodata-only dumps reported success).
+                  log info "asserting database has user data" db=immich
+                  ASSETS="$(${PSQL} 'select count(*) from asset')"
+                  USERS="$(${PSQL} 'select count(*) from "user"')"
+                  log info "row counts" db=immich assets="${ASSETS}" users="${USERS}"
+                  if [ "${ASSETS}" -eq 0 ] || [ "${USERS}" -eq 0 ]; then
+                    log error "refusing to back up empty database, backups not rotated" db=immich assets="${ASSETS}" users="${USERS}" hint="postgres-data is node-local, likely lost"
+                    exit 3
+                  fi
+
+                  TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+                  BACKUP_FILE="${BACKUP_DIR}/immich-db-${TIMESTAMP}.pgdump"
+                  mkdir -p "${BACKUP_DIR}"
+
+                  log info "starting pg_dump" db=immich path="${BACKUP_FILE}"
+                  pg_dump \
+                    --host=postgres \
+                    --username=immich \
+                    --dbname=immich \
+                    --format=custom \
+                    --file="${BACKUP_FILE}"
+
+                  # Post-dump verification. Every failure removes the bad file and exits
+                  # non-zero BEFORE the retention rm, so a bad dump can neither be kept nor
+                  # evict the last good one.
+                  BYTES="$(wc -c < "${BACKUP_FILE}")"
+                  log info "dump size" db=immich path="${BACKUP_FILE}" bytes="${BYTES}"
+
+                  if ! pg_restore --list "${BACKUP_FILE}" > /tmp/toc.txt; then
+                    log error "pg_restore --list could not read dump, removing it" db=immich path="${BACKUP_FILE}"
+                    rm -f "${BACKUP_FILE}"
+                    exit 1
+                  fi
+                  for TBL in asset user; do
+                    if ! grep -q "TABLE DATA public ${TBL} " /tmp/toc.txt; then
+                      log error "dump TOC missing table data, removing dump" db=immich table="${TBL}" path="${BACKUP_FILE}"
+                      rm -f "${BACKUP_FILE}"
+                      exit 1
+                    fi
+                  done
+
+                  if [ "${BYTES}" -le "${MIN_DUMP_BYTES}" ]; then
+                    log error "dump at or below geodata-only floor, removing it" db=immich bytes="${BYTES}" min_bytes="${MIN_DUMP_BYTES}" path="${BACKUP_FILE}"
+                    rm -f "${BACKUP_FILE}"
+                    exit 1
+                  fi
+
+                  log info "backup verified" db=immich path="${BACKUP_FILE}" size="$(du -h "${BACKUP_FILE}" | cut -f1)" assets="${ASSETS}" users="${USERS}"
+
+                  # Grandfather-father-son rotation. Only reached on a verified
+                  # dump, so a bad dump can neither be kept nor evict a good one.
+                  sh /scripts/gfs-prune.sh "${BACKUP_DIR}" '*.pgdump' immich-db-backup
+
+                  log info "current backups" db=immich dir="${BACKUP_DIR}"
+                  ls -lht "${BACKUP_DIR}"/*.pgdump
+              volumeMounts:
+                - name: media
+                  mountPath: /media
+                - name: retention-script
+                  mountPath: /scripts
+                  readOnly: true
+              resources:
+                requests:
+                  memory: 128Mi
+                limits:
+                  memory: 512Mi
+          volumes:
+            - name: media
+              persistentVolumeClaim:
+                claimName: media-pvc
+            - name: retention-script
+              configMap:
+                name: db-backup-retention-script
+                defaultMode: 0555

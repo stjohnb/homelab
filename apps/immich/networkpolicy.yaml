@@ -1,0 +1,82 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: immich-isolation
+  labels:
+    app: immich
+spec:
+  # Selects the immich Deployment pod only (server, machine-learning and
+  # valkey talk over localhost). The immich-db-backup CronJob carries
+  # component: db-backup and is covered by that policy instead.
+  podSelector:
+    matchLabels:
+      app: immich
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # truenas-gate's nginx proxies immich.home / immich.ext to immich:2283
+    # (the Ingress backend is the gate); Traefik is allowed for direct routing.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+        - podSelector:
+            matchLabels:
+              app: truenas-gate
+      ports:
+        - protocol: TCP
+          port: 2283
+
+  # Default-deny egress: DNS plus only the peers this app needs, so a
+  # compromised image cannot reach LAN hosts or unrelated in-cluster services
+  # (ForwardAuth guards the Ingress path, not the ClusterIP).
+  egress:
+    # Cluster DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Shared Postgres (DB_HOSTNAME=postgres).
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Authentik OIDC issuer (auth.home.bstjohn.net -> Traefik LoadBalancer IP)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+        - ipBlock:
+            cidr: 192.168.0.251/32
+      ports:
+        - protocol: TCP
+          port: 443
+    # Hugging Face model downloads for machine-learning and the GitHub
+    # version check.
+    # Public internet only: RFC1918 (LAN, node, pod and service CIDRs),
+    # link-local and CGNAT/Tailscale ranges are excluded.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10
+      ports:
+        - protocol: TCP
+          port: 443

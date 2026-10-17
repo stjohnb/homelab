@@ -1,0 +1,41 @@
+---
+# The Immich library on its own ZFS dataset, SSD-POOL/photos, with its own
+# export (nixos-config hosts/nas/default.nix). It is a child dataset, so it is
+# NOT visible through the media or pool-root exports (no crossmnt): the media
+# pipeline's mounts see an empty stub where this tree used to be. Only Immich
+# mounts it. The export squashes root, which is why immich-server runs as
+# 1000:1000 and the dataset is owned 1000:1000 (nixos-config
+# docs/dataset-migration.md).
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: photos-nfs-pv
+spec:
+  capacity:
+    storage: 1Ti
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 192.168.0.128
+    path: /mnt/SSD-POOL/photos
+  mountOptions:
+    - nfsvers=3
+    - hard
+    - intr
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: photos-pvc
+  labels:
+    app: immich
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Ti
+  volumeName: photos-nfs-pv
+  storageClassName: ""

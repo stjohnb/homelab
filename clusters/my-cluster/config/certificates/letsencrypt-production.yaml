@@ -1,0 +1,23 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-production
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: brendan@bstjohn.net
+    privateKeySecretRef:
+      name: letsencrypt-production-key
+    solvers:
+      - dns01:
+          route53:
+            region: us-east-1
+            hostedZoneID: Z03907802PP35TFR2FBIG
+            role: arn:aws:iam::762672791738:role/cert-manager-acme-dns01-route53
+            auth:
+              kubernetes:
+                serviceAccountRef:
+                  name: cert-manager-acme-dns01-route53
+        selector:
+          dnsZones:
+            - "bstjohn.net"

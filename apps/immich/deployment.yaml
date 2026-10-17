@@ -1,0 +1,289 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: immich
+  labels:
+    app: immich
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: immich
+  template:
+    metadata:
+      labels:
+        app: immich
+        component: server
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: standard
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 90
+      # Pinned to the storage node (k3s-nas). The NAS is powered off most of
+      # the time and this service is pointless without its media, so it must
+      # fail cleanly here rather than run without storage. See docs/nas-k3s.md.
+      nodeSelector:
+        node-role.kubernetes.io/storage: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/storage
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      # fsGroup only takes effect on the ml-cache local-path volume; NFS
+      # ignores it; the upload tree is owned 1000:1000 on the export itself.
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Renders the IMMICH_CONFIG_FILE from the Git-held template plus the
+        # client secret. Secrets are 48 alphanumeric chars, so the sed
+        # delimiter is safe.
+        - name: render-config
+          image: busybox:1.38@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              [ -n "${IMMICH_OIDC_CLIENT_SECRET:-}" ] || { echo "IMMICH_OIDC_CLIENT_SECRET is empty" >&2; exit 1; }
+              sed "s|__IMMICH_OIDC_CLIENT_SECRET__|${IMMICH_OIDC_CLIENT_SECRET}|" /template/immich-config.yaml > /config/immich-config.yaml
+              if grep -q __IMMICH_OIDC_CLIENT_SECRET__ /config/immich-config.yaml; then
+                echo "placeholder not substituted" >&2
+                exit 1
+              fi
+          env:
+            - name: IMMICH_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: IMMICH_OIDC_CLIENT_SECRET
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config-template
+              mountPath: /template
+              readOnly: true
+            - name: rendered-config
+              mountPath: /config
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 96Mi
+      containers:
+        - name: immich-server
+          image: ghcr.io/immich-app/immich-server:v3.3.1@sha256:db996e352359771c6a3db121a0ed8761516b22f727fc092a0f46dcfef82c1bc1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 2283
+          # The photos export is root_squash, so the server writes it as
+          # 1000:1000, the dataset owner. Only this container: machine-learning
+          # and valkey never touch the library.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: DB_HOSTNAME
+              value: postgres
+            - name: DB_DATABASE_NAME
+              value: immich
+            - name: DB_USERNAME
+              value: immich
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: immich-db-secret
+                  key: password
+            - name: REDIS_HOSTNAME
+              value: localhost
+            - name: IMMICH_MACHINE_LEARNING_URL
+              value: "http://localhost:3003"
+            - name: TZ
+              value: Europe/London
+            - name: IMMICH_CONFIG_FILE
+              value: /config/immich-config.yaml
+          volumeMounts:
+            # SSD-POOL/photos, mounted whole: the dataset root IS the upload
+            # tree (it was media/photos when this mounted media-pvc).
+            - name: photos
+              mountPath: /usr/src/app/upload
+            # External-library root (read-only NAS photo archive).
+            # immich-machine-learning and valkey must not mount it.
+            - name: backup-photos
+              mountPath: /mnt/external/backup-photos
+              readOnly: true
+            - name: rendered-config
+              mountPath: /config
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /api/server/ping
+              port: 2283
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            # ~10.5 minutes. The first start against the shared instance runs the
+            # VectorChord reindex (`Reindexing clip_index` / `Reindexing face_index`)
+            # before the server answers /api/server/ping.
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /api/server/ping
+              port: 2283
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/server/ping
+              port: 2283
+            initialDelaySeconds: 60
+            periodSeconds: 60
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 4Gi
+
+        - name: immich-machine-learning
+          image: ghcr.io/immich-app/immich-machine-learning:v3.3.1@sha256:513c831cfb010ad319341a0c86b42c575a0d5b688d3e8cae346ee624074a58ed
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3003
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: TZ
+              value: Europe/London
+            # Preload models on startup to avoid cold-start latency
+            # v3 removed the single MACHINE_LEARNING_PRELOAD__CLIP fallback; v2
+            # mapped it onto both of these, so this keeps the same behaviour.
+            - name: MACHINE_LEARNING_PRELOAD__CLIP__TEXTUAL
+              value: ViT-B-32__openai
+            - name: MACHINE_LEARNING_PRELOAD__CLIP__VISUAL
+              value: ViT-B-32__openai
+            - name: MACHINE_LEARNING_PRELOAD__FACE
+              value: buffalo_l
+            # Keep models in memory for 1 hour (default 5 min causes frequent reloads)
+            - name: MACHINE_LEARNING_CACHE_TIMEOUT
+              value: "3600"
+          volumeMounts:
+            - name: ml-cache
+              mountPath: /cache
+          # Startup probe: give container up to 5 minutes to load models
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: 3003
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 27
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 3003
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 3003
+            initialDelaySeconds: 10
+            periodSeconds: 60
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 4000m
+              memory: 4Gi
+
+        - name: valkey
+          image: valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 6379
+          # 999 is the image's valkey user. Valkey is only a job queue/cache
+          # here, so /data is an emptyDir and the root filesystem is read-only.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: TZ
+              value: Europe/London
+          startupProbe:
+            exec:
+              command:
+                - valkey-cli
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+          readinessProbe:
+            exec:
+              command:
+                - valkey-cli
+                - ping
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          volumeMounts:
+            - name: valkey-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+      volumes:
+        - name: photos
+          persistentVolumeClaim:
+            claimName: photos-pvc
+        - name: backup-photos
+          persistentVolumeClaim:
+            claimName: backup-photos-pvc
+            readOnly: true
+        - name: ml-cache
+          persistentVolumeClaim:
+            claimName: immich-ml-cache-pvc
+        - name: valkey-data
+          emptyDir: {}
+        - name: config-template
+          configMap:
+            name: immich-config-template
+        - name: rendered-config
+          emptyDir:
+            medium: Memory

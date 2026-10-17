@@ -1,0 +1,16 @@
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-home-bstjohn-net
+  namespace: default
+spec:
+  secretName: wildcard-home-tls
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer
+  dnsNames:
+    - "*.home.bstjohn.net"
+    - "home.bstjohn.net"
+    - "*.ext.bstjohn.net"
+    - "ext.bstjohn.net"

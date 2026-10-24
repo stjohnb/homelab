@@ -1,0 +1,98 @@
+# Default-deny egress for every pod the traefik chart renders into the
+# `traefik` namespace. Traefik terminates TLS for every LAN service and holds
+# the wildcard certificate, so a compromised Traefik must not reach the node,
+# LAN hosts or in-cluster services beyond the backends it routes to.
+#
+# policyTypes is Egress only on purpose: Traefik's LoadBalancer ingress
+# (192.168.0.251:80/443) must stay open to the LAN, and ingress default-deny
+# is out of scope (#clw_01M5D8MA4Y7TXF7TT29535ZQ9P).
+#
+# Consumers of each rule:
+#   - cluster DNS: Service and ForwardAuth hostname resolution
+#   - Kubernetes API: Ingress/IngressRoute/Middleware/Service/Endpoints
+#     discovery and publishedService status updates
+#   - `default` namespace pods: every Ingress/IngressRoute backend and the
+#     Authentik ForwardAuth endpoint (authentik-server:9000)
+#   - LAN /32s: the hand-written Endpoints behind the unifi,
+#     home-assistant, music-assistant and awtrix Services. A new
+#     Endpoints-backed LAN service needs its own /32 rule here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: traefik-isolation
+  namespace: traefik
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # Cluster DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Kubernetes API for ingress discovery. Both the ClusterIP and the
+    # post-DNAT node address, because kube-router evaluates either depending
+    # on the path.
+    - to:
+        - ipBlock:
+            cidr: 10.43.0.1/32
+        - ipBlock:
+            cidr: 192.168.0.251/32
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    # Every Ingress/IngressRoute backend and the ForwardAuth endpoint live in
+    # `default`. Any TCP port rather than an enumerated list: each backend's
+    # own ingress policy already bounds what Traefik can reach, and a port
+    # list would need a Traefik edit per new app that CI cannot verify.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+      ports:
+        - protocol: TCP
+    # UniFi gateway (apps/unifi/endpoints.yaml).
+    - to:
+        - ipBlock:
+            cidr: 192.168.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+    # Home Assistant (apps/home-assistant/endpoints.yaml).
+    - to:
+        - ipBlock:
+            cidr: 192.168.0.251/32
+      ports:
+        - protocol: TCP
+          port: 8123
+    # Music Assistant, same host (apps/music-assistant/endpoints.yaml).
+    - to:
+        - ipBlock:
+            cidr: 192.168.0.251/32
+      ports:
+        - protocol: TCP
+          port: 8095
+    # Awtrix clocks (apps/awtrix/endpoints.yaml).
+    - to:
+        - ipBlock:
+            cidr: 192.168.0.30/32
+      ports:
+        - protocol: TCP
+          port: 80
+    - to:
+        - ipBlock:
+            cidr: 192.168.0.160/32
+      ports:
+        - protocol: TCP
+          port: 80

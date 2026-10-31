@@ -1,0 +1,13 @@
+# Post-auth half of the authentik-auth-basic(-ext) chains: clears
+# Authorization after ForwardAuth has accepted the request, so neither Grafana
+# (which would treat it as its own basic auth) nor Prometheus ever sees the
+# Authentik app password.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: authentik-strip-authorization
+  namespace: default
+spec:
+  headers:
+    customRequestHeaders:
+      Authorization: ""

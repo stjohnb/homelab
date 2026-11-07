@@ -1,0 +1,41 @@
+---
+# Read-only view of the NAS photo archive, backup/Photos-sorted, for an Immich
+# external library. It uses its own `ro`, root-squashed, node-restricted export
+# (nixos-config hosts/nas/default.nix), not the pool-root export, so it is
+# read-only by design for #clw_01M4R90D4X8XPXFFXTKKJ15AGW and needs no re-point
+# when the pool-root export is retired. Only immich-server mounts it.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: backup-photos-nfs-pv
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadOnlyMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 192.168.0.128
+    path: /mnt/SSD-POOL/backup/Photos-sorted
+    readOnly: true
+  mountOptions:
+    - nfsvers=3
+    - hard
+    - intr
+    - ro
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backup-photos-pvc
+  labels:
+    app: immich
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 100Gi
+  volumeName: backup-photos-nfs-pv
+  storageClassName: ""

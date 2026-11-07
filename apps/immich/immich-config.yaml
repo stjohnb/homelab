@@ -1,0 +1,28 @@
+# Immich system config, loaded via IMMICH_CONFIG_FILE (rendered by the
+# render-config initContainer; not a Kubernetes resource).
+#
+# Immich copies this file key-by-key over its built-in defaults, so only the
+# keys below differ from stock; everything else stays at the Immich default.
+# While a config file is in use, EVERY admin-UI setting is read-only: change
+# settings by adding keys here.
+# __IMMICH_OIDC_CLIENT_SECRET__ is substituted at pod start from authentik-secrets.
+oauth:
+  enabled: true
+  issuerUrl: https://auth.home.bstjohn.net/application/o/immich/
+  clientId: immich
+  clientSecret: __IMMICH_OIDC_CLIENT_SECRET__
+  scope: openid email profile
+  signingAlgorithm: RS256
+  profileSigningAlgorithm: none
+  tokenEndpointAuthMethod: client_secret_post
+  buttonText: Login with Authentik
+  autoRegister: true
+  autoLaunch: false
+  storageLabelClaim: preferred_username
+  storageQuotaClaim: immich_quota
+  defaultStorageQuota: null
+  roleClaim: immich_role
+  mobileOverrideEnabled: false
+  mobileRedirectUri: ""
+passwordLogin:
+  enabled: true

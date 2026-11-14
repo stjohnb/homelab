@@ -1,0 +1,101 @@
+# Default-deny egress for every pod the cert-manager chart renders into the
+# `cert-manager` namespace. The controller holds the ACME account key and
+# assumes the Route53 DNS-01 role, so a compromised cert-manager must not
+# reach the LAN, the node or in-cluster services.
+#
+# policyTypes is Egress only on purpose: the API server must keep reaching
+# the cert-manager webhook (validating/mutating admission, TCP 10250), and
+# ingress default-deny is out of scope (#clw_01M5D8MA4Y7TXF7TT29535ZQ9P).
+#
+# Two policies, unioned for the controller:
+#   - cert-manager-isolation (every pod): DNS plus the Kubernetes API, for the
+#     controller, webhook, cainjector and the startupapicheck Job
+#   - cert-manager-controller-egress (controller only): public HTTPS for
+#     acme-v02.api.letsencrypt.org, sts.amazonaws.com (web-identity role
+#     cert-manager-acme-dns01-route53) and route53.amazonaws.com, plus public
+#     DNS for the DNS-01 propagation self-check against the authoritative
+#     Route53 nameservers
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cert-manager-isolation
+  namespace: cert-manager
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # Cluster DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Kubernetes API: Certificate/Order/Challenge reconciliation, the
+    # ServiceAccount TokenRequest for the Route53 web identity, CA injection
+    # and the webhook's serving-cert Secret. Both the ClusterIP and the
+    # post-DNAT node address, because kube-router evaluates either depending
+    # on the path.
+    - to:
+        - ipBlock:
+            cidr: 10.43.0.1/32
+        - ipBlock:
+            cidr: 192.168.0.251/32
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cert-manager-controller-egress
+  namespace: cert-manager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: controller
+  policyTypes:
+    - Egress
+  egress:
+    # Public HTTPS: the Let's Encrypt ACME directory
+    # (acme-v02.api.letsencrypt.org, and the staging endpoint), AWS STS
+    # (sts.amazonaws.com, AssumeRoleWithWebIdentity) and Route53
+    # (route53.amazonaws.com) for the DNS-01 TXT record.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10
+      ports:
+        - protocol: TCP
+          port: 443
+    # Public DNS: the DNS-01 propagation self-check queries the authoritative
+    # Route53 nameservers directly; without it every renewal hangs at the
+    # propagation check.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

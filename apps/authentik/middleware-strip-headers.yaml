@@ -1,0 +1,18 @@
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: authentik-strip-headers
+  namespace: default
+spec:
+  headers:
+    customRequestHeaders:
+      X-authentik-username: ""
+      X-authentik-groups: ""
+      X-authentik-email: ""
+      X-authentik-name: ""
+      X-authentik-uid: ""
+      X-authentik-grafana-role: ""
+      # FreshRSS trusts both as its http_auth username.
+      Remote-User: ""
+      X-WebAuth-User: ""
+      Authorization: ""
